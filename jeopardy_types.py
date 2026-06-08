@@ -27,6 +27,12 @@ class CategoryClassification(TypedDict):
     category: str  # normalized (uppercased) on-air category text
     subject: str  # broad bucket from the controlled SUBJECTS vocabulary
     sub_category: str  # normalized, human-readable narrower grouping
+    # Non-empty when the category uses a wordplay format (Before & After, Rhyme
+    # Time, Anagrams…) to test knowledge of a specific non-language domain.
+    # E.g. "SCIENCE BEFORE & AFTER" → subject="Wordplay & Language",
+    # secondary_subject="Science". Used in blended scoring so the card gets
+    # credit in both its format domain and its knowledge domain.
+    secondary_subject: str  # "" if purely wordplay / no secondary domain
 
 
 class NoteRow(TypedDict):

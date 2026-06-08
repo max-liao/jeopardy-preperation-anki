@@ -66,8 +66,8 @@ logger = logging.getLogger(__name__)
 Tier = Literal["high", "medium", "low", "rare"]
 
 # Per-note computed metadata used for scoring then writing.
-# (answer_key, subcat_key, subject, subcat_label, year)
-NoteMeta = tuple[str, str, str, str, int]
+# (answer_key, subcat_key, subject, subcat_label, secondary_subject, year)
+NoteMeta = tuple[str, str, str, str, str, int]
 
 _DEFAULT_SUBCAT = "Miscellaneous"
 _TAG_SANITIZE_RE = re.compile(r"[^A-Za-z0-9]+")
@@ -111,37 +111,38 @@ def tier_from_score(score: float) -> Tier:
     return "rare"
 
 
-def load_taxonomy(path: Path) -> dict[str, tuple[str, str]]:
-    """Load the category taxonomy as {CATEGORY_UPPER: (subject, sub_category)}.
+def load_taxonomy(path: Path) -> dict[str, tuple[str, str, str]]:
+    """Load the category taxonomy as {CATEGORY_UPPER: (subject, sub_category, secondary_subject)}.
 
     Args:
         path: Path to category_taxonomy.json
 
     Returns:
-        Mapping of uppercased category -> (subject, sub_category). Empty if the
-        file is absent (every card then falls back to Other/Miscellaneous).
+        Mapping of uppercased category -> (subject, sub_category, secondary_subject). Empty if the
+        file is absent (every card then falls back to Other/Miscellaneous/"").
     """
     if not path.exists():
         logger.warning(f"Taxonomy {path} not found — all cards will be 'Other'")
         return {}
     with open(path, encoding="utf-8") as f:
         raw = json.load(f)
-    out: dict[str, tuple[str, str]] = {}
+    out: dict[str, tuple[str, str, str]] = {}
     for cat, info in raw.items():
         subject = str(info.get("subject", SUBJECT_OTHER)) or SUBJECT_OTHER
         sub_category = str(info.get("sub_category", _DEFAULT_SUBCAT)) or _DEFAULT_SUBCAT
-        out[cat] = (subject, sub_category)
+        secondary_subject = str(info.get("secondary_subject", "")).strip()
+        out[cat] = (subject, sub_category, secondary_subject)
     return out
 
 
 def read_note_meta(
-    conn: sqlite3.Connection, taxonomy: dict[str, tuple[str, str]]
+    conn: sqlite3.Connection, taxonomy: dict[str, tuple[str, str, str]]
 ) -> dict[int, NoteMeta]:
     """Read every Jeopardy note and derive its scoring metadata.
 
     Args:
         conn: SQLite connection
-        taxonomy: category -> (subject, sub_category) map
+        taxonomy: category -> (subject, sub_category, secondary_subject) map
 
     Returns:
         note_id -> NoteMeta
@@ -156,35 +157,60 @@ def read_note_meta(
         answer = parts[FIELD_ANSWER].strip()
         category = parts[FIELD_CATEGORY].strip().upper()
         year = get_year_from_date(parts[FIELD_AIR_DATE].strip())
-        subject, subcat_label = taxonomy.get(category, (SUBJECT_OTHER, _DEFAULT_SUBCAT))
+        subject, subcat_label, secondary_subject = taxonomy.get(
+            category, (SUBJECT_OTHER, _DEFAULT_SUBCAT, "")
+        )
         answer_key = answer.casefold()
         subcat_key = subcat_label.casefold()
-        meta[note_id] = (answer_key, subcat_key, subject, subcat_label, year)
+        meta[note_id] = (
+            answer_key,
+            subcat_key,
+            subject,
+            subcat_label,
+            secondary_subject,
+            year,
+        )
     logger.info(f"Read metadata for {len(meta)} notes")
     return meta
 
 
 def build_frequency_tables(
     meta: dict[int, NoteMeta],
-) -> tuple[dict[str, float], dict[str, float], dict[str, float]]:
-    """Build recency-weighted frequency sums for answer, sub-category, subject.
+) -> tuple[dict[str, float], dict[str, float], dict[str, float], dict[str, float]]:
+    """Build recency-weighted frequency sums for answer, sub-category, subject, secondary_subject.
 
     Args:
         meta: note_id -> NoteMeta
 
     Returns:
-        (answer_score, subcat_score, subject_score) keyed by the respective keys
+        (answer_score, subcat_score, subject_score, secondary_subject_score) keyed by the
+        respective keys
     """
     answer_score: dict[str, float] = defaultdict(float)
     subcat_score: dict[str, float] = defaultdict(float)
     subject_score: dict[str, float] = defaultdict(float)
-    for answer_key, subcat_key, subject, _label, year in meta.values():
+    secondary_subject_score: dict[str, float] = defaultdict(float)
+    for (
+        answer_key,
+        subcat_key,
+        subject,
+        _label,
+        secondary_subject,
+        year,
+    ) in meta.values():
         weight = recency_weight(year)
         if answer_key:
             answer_score[answer_key] += weight
         subcat_score[subcat_key] += weight
         subject_score[subject] += weight
-    return dict(answer_score), dict(subcat_score), dict(subject_score)
+        if secondary_subject:
+            secondary_subject_score[secondary_subject] += weight
+    return (
+        dict(answer_score),
+        dict(subcat_score),
+        dict(subject_score),
+        dict(secondary_subject_score),
+    )
 
 
 def make_percentile_fn(values: list[float]) -> Callable[[float], float]:
@@ -210,17 +236,23 @@ def score_notes(
     answer_score: dict[str, float],
     subcat_score: dict[str, float],
     subject_score: dict[str, float],
+    secondary_subject_score: dict[str, float],
 ) -> dict[int, tuple[int, Tier]]:
     """Compute the blended 0-100 score and tier for every note.
 
     Each component is converted to a percentile across all notes, then blended
     with the configured weights and scaled to 0-100.
 
+    For the subject component, uses max(primary_subject, secondary_subject) so that
+    a wordplay category embedding a knowledge domain (e.g. "SCIENCE BEFORE & AFTER")
+    gets credit for whichever domain scores higher.
+
     Args:
         meta: note_id -> NoteMeta
         answer_score: answer_key -> recency-weighted frequency
         subcat_score: subcat_key -> recency-weighted frequency
         subject_score: subject -> recency-weighted frequency
+        secondary_subject_score: secondary_subject -> recency-weighted frequency
 
     Returns:
         note_id -> (score 0-100, tier)
@@ -233,14 +265,22 @@ def score_notes(
     cv: dict[int, float] = {}
     sv: dict[int, float] = {}
     for nid, m in meta.items():
-        answer_key, subcat_key, subject, subcat_label, _year = m
+        answer_key, subcat_key, subject, subcat_label, secondary_subject, _year = m
         av[nid] = answer_score.get(answer_key, 0.0) if answer_key else 0.0
         cv[nid] = (
             0.0
             if subcat_label == _DEFAULT_SUBCAT
             else subcat_score.get(subcat_key, 0.0)
         )
-        sv[nid] = 0.0 if subject == SUBJECT_OTHER else subject_score.get(subject, 0.0)
+        primary_sv = (
+            0.0 if subject == SUBJECT_OTHER else subject_score.get(subject, 0.0)
+        )
+        secondary_sv = (
+            secondary_subject_score.get(secondary_subject, 0.0)
+            if secondary_subject
+            else 0.0
+        )
+        sv[nid] = max(primary_sv, secondary_sv)
 
     pct_a = make_percentile_fn(list(av.values()))
     pct_c = make_percentile_fn(list(cv.values()))
@@ -363,7 +403,7 @@ def apply_scores_and_tags(
         if note_id not in scored:
             continue
         score, tier = scored[note_id]
-        _ak, _ck, subject, subcat_label, year = meta[note_id]
+        _ak, _ck, subject, subcat_label, secondary_subject, year = meta[note_id]
         badge = badge_html(score, tier, subject)
 
         parts = flds.split("\x1f")
@@ -382,6 +422,8 @@ def apply_scores_and_tags(
         kept.append(f"freq:{tier}")
         kept.append(f"subject:{sanitize_tag_value(subject)}")
         kept.append(f"subcat:{sanitize_tag_value(subcat_label)}")
+        if secondary_subject:
+            kept.append(f"subcat2:{sanitize_tag_value(secondary_subject)}")
         if year > 0:
             kept.append(get_era_tag(year))
         new_tags = " " + " ".join(kept) + " " if kept else ""
@@ -398,6 +440,7 @@ def print_report(
     meta: dict[int, NoteMeta],
     scored: dict[int, tuple[int, Tier]],
     subject_score: dict[str, float],
+    secondary_subject_score: dict[str, float],
 ) -> None:
     """Print a frequency analysis summary."""
     tier_counts: dict[str, int] = defaultdict(int)
@@ -413,10 +456,23 @@ def print_report(
         pct = (100.0 * cnt / total) if total else 0.0
         print(f"  freq:{tier:<6} {cnt:>7,} ({pct:5.1f}%)")
 
+    secondary_count = sum(1 for m in meta.values() if m[4])
+    print(
+        f"\nCards with secondary_subject (wordplay+domain): {secondary_count:,} ({100.0*secondary_count/total:.1f}%)"
+    )
+
     print("\nTop subjects by recency-weighted frequency:")
     top = sorted(subject_score.items(), key=lambda kv: kv[1], reverse=True)
     for subject, sc in top[:15]:
         print(f"  {subject:<24} {sc:>10.1f}")
+
+    if secondary_subject_score:
+        print("\nTop secondary_subjects (wordplay domain boost):")
+        sec_top = sorted(
+            secondary_subject_score.items(), key=lambda kv: kv[1], reverse=True
+        )
+        for subject, sc in sec_top[:10]:
+            print(f"  {subject:<24} {sc:>10.1f}")
     print()
 
 
@@ -457,13 +513,18 @@ def main() -> None:
             logger.info(f"Loaded taxonomy with {len(taxonomy)} categories")
 
             meta = read_note_meta(conn, taxonomy)
-            answer_score, subcat_score, subject_score = build_frequency_tables(meta)
+            answer_score, subcat_score, subject_score, secondary_subject_score = (
+                build_frequency_tables(meta)
+            )
             logger.info(
                 f"Tables: {len(answer_score)} answers, {len(subcat_score)} "
-                f"sub-categories, {len(subject_score)} subjects"
+                f"sub-categories, {len(subject_score)} subjects, "
+                f"{len(secondary_subject_score)} secondary subjects"
             )
-            scored = score_notes(meta, answer_score, subcat_score, subject_score)
-            print_report(meta, scored, subject_score)
+            scored = score_notes(
+                meta, answer_score, subcat_score, subject_score, secondary_subject_score
+            )
+            print_report(meta, scored, subject_score, secondary_subject_score)
 
             if args.analysis_only:
                 logger.info("Analysis-only mode; exiting")

@@ -125,18 +125,27 @@ def build_prompt(batch: list[str]) -> str:
     numbered = "\n".join(f"{i + 1}. {cat}" for i, cat in enumerate(batch))
     return (
         "You are classifying Jeopardy! category names into a two-level taxonomy.\n"
-        "For EACH input category, output its broad SUBJECT and a normalized "
-        "SUB_CATEGORY.\n\n"
-        f"SUBJECT must be EXACTLY one of this controlled list: {subject_list}.\n"
+        "For EACH input category, output its broad SUBJECT, a normalized "
+        "SUB_CATEGORY, and an optional SECONDARY_SUBJECT.\n\n"
+        f"SUBJECT must be EXACTLY one of: {subject_list}.\n"
         "SUB_CATEGORY is a short, canonical, Title Case grouping label that "
         "collapses synonyms (e.g. 'RUSSIAN LIT' and 'CLASSIC RUSSIAN AUTHORS' "
-        "should both map to sub_category 'Russian Literature'; categories about "
-        "one person use that person, e.g. 'Ernest Hemingway'). Reuse the same "
-        "sub_category label for equivalent categories so they aggregate.\n"
+        "both → 'Russian Literature'; single-person categories use that person, "
+        "e.g. 'Ernest Hemingway'). Reuse the same sub_category for equivalent "
+        "categories so they aggregate cleanly.\n"
         "If a category is a grab-bag with no clear topic (e.g. POTPOURRI, "
         "HODGEPODGE), use subject 'Other' and sub_category 'Miscellaneous'.\n\n"
+        "SECONDARY_SUBJECT: some categories use a WORDPLAY FORMAT (Before & "
+        "After, Rhyme Time, Double Talk, Anagrams, Homophones, Letter games…) "
+        "to test knowledge of a SPECIFIC KNOWLEDGE DOMAIN. For those, set "
+        "secondary_subject to the knowledge domain (e.g. 'Science', 'History', "
+        "'Literature'). Example: 'SCIENCE BEFORE & AFTER' → subject='Wordplay "
+        "& Language', sub_category='Before & After', secondary_subject='Science'. "
+        "For purely linguistic categories with no embedded topic, leave "
+        'secondary_subject as empty string "".\n\n'
         "Return ONLY a JSON array, one object per input, in the SAME order, with "
-        'keys "category", "subject", "sub_category". No prose, no code fence.\n\n'
+        'keys "category", "subject", "sub_category", "secondary_subject". '
+        "No prose, no code fence.\n\n"
         f"Categories:\n{numbered}"
     )
 
@@ -282,13 +291,24 @@ def classify_batch(
         if found is None:
             # Model responded but skipped this one — treat as uncategorizable.
             out[cat] = CategoryClassification(
-                category=cat, subject=SUBJECT_OTHER, sub_category="Miscellaneous"
+                category=cat,
+                subject=SUBJECT_OTHER,
+                sub_category="Miscellaneous",
+                secondary_subject="",
             )
             continue
         subject = canonical_subject(str(found.get("subject", "")))
         sub_category = str(found.get("sub_category", "")).strip() or "Miscellaneous"
+        raw_secondary = str(found.get("secondary_subject", "")).strip()
+        secondary_subject = canonical_subject(raw_secondary) if raw_secondary else ""
+        # Don't let secondary_subject be the same as subject or "Other".
+        if secondary_subject == subject or secondary_subject == SUBJECT_OTHER:
+            secondary_subject = ""
         out[cat] = CategoryClassification(
-            category=cat, subject=subject, sub_category=sub_category
+            category=cat,
+            subject=subject,
+            sub_category=sub_category,
+            secondary_subject=secondary_subject,
         )
     return out
 
@@ -339,6 +359,28 @@ def main() -> None:
     logger.info(f"Loaded {len(taxonomy)} cached classifications")
 
     todo = [c for c in all_categories if c not in taxonomy]
+
+    # Sort by card frequency (highest first) so the most impactful categories
+    # are classified first. Requires a quick pass over the DB card counts.
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = extract_colpkg(source_path, Path(tmpdir))
+        conn = sqlite3.connect(db_path)
+        cat_freq: dict[str, int] = {}
+        for (flds,) in conn.execute(
+            "SELECT flds FROM notes WHERE mid = ?", (JEOPARDY_NOTETYPE_ID,)
+        ):
+            parts = flds.split("\x1f")
+            if len(parts) > FIELD_CATEGORY:
+                cat = parts[FIELD_CATEGORY].strip().upper()
+                if cat:
+                    cat_freq[cat] = cat_freq.get(cat, 0) + 1
+        conn.close()
+    todo.sort(key=lambda c: cat_freq.get(c, 0), reverse=True)
+    logger.info(
+        f"Top unclassified category: '{todo[0]}' ({cat_freq.get(todo[0], 0)} cards)"
+        if todo
+        else "No categories to classify"
+    )
     if args.limit:
         todo = todo[: args.limit]
     logger.info(f"Classifying {len(todo)} new categories")

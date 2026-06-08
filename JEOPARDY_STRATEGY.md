@@ -2,6 +2,28 @@
 
 ---
 
+## Study Priority (Connecting Deck to Strategy)
+
+The prep deck (see `JEOPARDY_PREP_DECK.md`) scores cards by recency-weighted frequency. Use it strategically:
+
+**Best return-on-study-time:**
+
+```
+tag:freq:high tag:era:recent         → answers that recur AND are recent
+tag:freq:high tag:subject:History    → if History is a weak area
+tag:subcat2:Science                  → wordplay categories that test Science (e.g. "SCIENCE BEFORE & AFTER")
+```
+
+**Subject breakdown from taxonomy (top subjects by category volume):**
+
+- Wordplay & Language — very overrepresented (~25% of categories); most are Before & After / Rhyme Time
+- Film & TV, Geography, Literature — next tier
+- History, Science, Music — strong recurring subjects
+
+**For Daily Double preparation:** Focus on `tag:freq:high` within whatever category you land on. The hardest DD clues tend to be multi-step (connecting two facts), so drilling high-frequency answers in each subject gives the best coverage.
+
+---
+
 ## Daily Double Strategy
 
 ### Placement Rules
