@@ -10,23 +10,20 @@ Step 1: Merge post-2019 clues
   → 7,200 reviewed cards + full revlog preserved
 
 Step 2: Classify categories via LLM
-  classify_categories.py  ⏳ IN PROGRESS (~39K / 54,519 done)
-  → category_taxonomy.json (incremental checkpoint, safe to interrupt)
+  classify_categories.py  ✅ DONE (54,519/54,519 classifications complete)
+  → category_taxonomy.json with all categories classified
   → Sorted by card frequency: highest-impact categories first
-  → Resume: CLAUDE_CODE_EXECPATH=<claude-bin> nohup python3 classify_categories.py updated.colpkg > classify.log 2>&1 &
-  → claude binary: /home/max/.vscode/extensions/anthropic.claude-code-2.1.168-linux-x64/resources/native-binary/claude
 
 Step 3: Consolidate taxonomy
-  consolidate_taxonomy.py  ✅ WRITTEN, applied once (will re-run after Step 2)
-  → Merges 54K LLM categories → ~600–800 clean sub-categories
-  → Injects 296 MANUAL_OVERRIDES for top high-frequency on-air categories
-  → Run: python3 consolidate_taxonomy.py [--dry-run]
+  consolidate_taxonomy.py  ✅ DONE
+  → Reduced 13,529 → 13,378 unique sub-categories (151 temporal merges)
+  → Stripped temporal prefixes: "1980s Culture" → "Culture"
 
 Step 4: Score + tag cards
-  smart_prep.py  ✅ WRITTEN, not yet run
-  → Adds "Frequency Score" field + badge to notetype
-  → Tags all notes: freq:* subject:* subcat:* subcat2:* era:*
-  → Run: python3 smart_prep.py updated.colpkg jeopardy_scored.colpkg
+  smart_prep.py  ✅ DONE
+  → Created jeopardy_scored.colpkg (452,268 notes scored)
+  → Stake weighting: Final Jeopardy 4.0x, DD 2.5x/2.0x, value-based scaling
+  → Tier distribution: 10.1% high, 58.5% medium, 29.4% low, 2.0% rare
 
 Step 5: Import into Anki
   ⏳ User step — import jeopardy_scored.colpkg into Anki desktop
@@ -38,17 +35,17 @@ Step 5: Import into Anki
 
 ## Scripts & Files
 
-| File | Purpose |
-|---|---|
-| `update_collection.py` | Merges jwolle1 TSV clues (post-2019) into .colpkg |
-| `classify_categories.py` | LLM-classifies on-air categories → `category_taxonomy.json` |
+| File                      | Purpose                                                                                   |
+| ------------------------- | ----------------------------------------------------------------------------------------- |
+| `update_collection.py`    | Merges jwolle1 TSV clues (post-2019) into .colpkg                                         |
+| `classify_categories.py`  | LLM-classifies on-air categories → `category_taxonomy.json`                               |
 | `consolidate_taxonomy.py` | Post-processes taxonomy: merges synonyms, strips temporal noise, injects manual overrides |
-| `smart_prep.py` | Blended frequency scoring + field/template + tag writes |
-| `jeopardy_consts.py` | All constants: field indices, tier thresholds, recency weights, subjects |
-| `jeopardy_types.py` | TypedDicts: `CategoryClassification`, `NoteRow`, `AnkiCardRow`, etc. |
-| `jeopardy_db_helpers.py` | extract/repack .colpkg, SQLite helpers |
-| `category_taxonomy.json` | LLM classification cache: `{CATEGORY: {subject, sub_category, secondary_subject}}` |
-| `updated.colpkg` | Merged 1984–2025 collection (source for Steps 2–5) |
+| `smart_prep.py`           | Blended frequency scoring + field/template + tag writes                                   |
+| `jeopardy_consts.py`      | All constants: field indices, tier thresholds, recency weights, subjects                  |
+| `jeopardy_types.py`       | TypedDicts: `CategoryClassification`, `NoteRow`, `AnkiCardRow`, etc.                      |
+| `jeopardy_db_helpers.py`  | extract/repack .colpkg, SQLite helpers                                                    |
+| `category_taxonomy.json`  | LLM classification cache: `{CATEGORY: {subject, sub_category, secondary_subject}}`        |
+| `updated.colpkg`          | Merged 1984–2025 collection (source for Steps 2–5)                                        |
 
 ---
 
@@ -62,14 +59,14 @@ score = 0.40 × answer_percentile
       + 0.25 × max(subject_percentile, secondary_subject_percentile)
 ```
 
-Each component is the **percentile rank** of that note's recency-weighted frequency across all notes. Result scaled to 0–100, mapped to tier:
+Each component is the **percentile rank** of that note's **stake-weighted recency frequency** across all notes. The stake multiplier reflects round difficulty (Final Jeopardy > Daily Double > regular) and dollar value (higher = harder). Result scaled to 0–100, mapped to tier:
 
-| Tier | Score | Tag |
-|---|---|---|
-| high | ≥ 70 | `freq:high` |
+| Tier   | Score | Tag           |
+| ------ | ----- | ------------- |
+| high   | ≥ 70  | `freq:high`   |
 | medium | 40–69 | `freq:medium` |
-| low | 15–39 | `freq:low` |
-| rare | < 15 | `freq:rare` |
+| low    | 15–39 | `freq:low`    |
+| rare   | < 15  | `freq:rare`   |
 
 ### Recency Weights
 
@@ -80,6 +77,20 @@ Each component is the **percentile rank** of that note's recency-weighted freque
 {y: 0.2 for y in range(1984, 2010)}
 ```
 
+### Stake Multipliers (Round & Value)
+
+Each note's frequency weight is multiplied by a stake multiplier reflecting the clue's difficulty tier and dollar value:
+
+| Category                       | Multiplier         |
+| ------------------------------ | ------------------ |
+| Final Jeopardy                 | 4.0x               |
+| Daily Double (Double Jeopardy) | 2.5x               |
+| Daily Double (Jeopardy)        | 2.0x               |
+| Double Jeopardy $400–$2000     | 1.1x–1.5x (linear) |
+| Jeopardy $200–$1000            | 0.6x–1.0x (linear) |
+
+The multiplier is computed per-note by `compute_stake_multiplier()` in `smart_prep.py`, reading fields 3 (Round), 7 (Value), and 8 (Daily Double). For non-Daily-Double clues in regular rounds, the multiplier scales linearly with dollar value within that round (no overlap between rounds).
+
 ### secondary_subject (Wordplay + Domain)
 
 Some categories use a **wordplay format** (Before & After, Rhyme Time, Anagrams…) to test a **knowledge domain**. Example: `SCIENCE BEFORE & AFTER` → `subject="Wordplay & Language"`, `secondary_subject="Science"`.
@@ -89,6 +100,7 @@ These cards are tagged with both `subject:Wordplay_Language` and `subcat2:Scienc
 ### Taxonomy Pipeline
 
 The LLM classifier produces raw output with ~54K entries. `consolidate_taxonomy.py` then:
+
 1. Injects **296 MANUAL_OVERRIDES** for the highest-frequency on-air categories (SCIENCE, LITERATURE, HISTORY, OPERA, etc.) that otherwise stay uncategorized due to genericity
 2. Eliminates catch-all sub-categories (Miscellaneous, Other, Potpourri → `sub_category=null`)
 3. Strips temporal prefixes from sub-category names (`1950s Travel` → `Travel`)
@@ -102,22 +114,22 @@ With MANUAL_OVERRIDES applied, ~39.2% of cards are already covered (177K/452K) e
 
 The "Jeopardy" notetype has 14 fields (0-indexed, `\x1f`-delimited):
 
-| # | Field | Notes |
-|---|---|---|
-| 0 | Show number | |
-| 1 | AirDate | `YYYY-MM-DD` |
-| 2 | Extra Info | TSV `comments` |
-| 3 | Round | `Jeopardy` / `Double Jeopardy` / `Final Jeopardy` |
-| 4 | Coords | row,col position |
-| 5 | Category | on-air category (used for taxonomy lookup) |
-| 6 | Order | |
-| 7 | Value | `$400`, `$2000`, etc. |
-| 8 | Daily Double | `True` / `False` |
-| 9 | Question | **The clue shown** (TSV `answer`) |
-| 10 | Links | |
-| 11 | Answer | **The correct response** (TSV `question`) |
-| 12 | Correct Attempts | |
-| 13 | Wrong Attempts | |
+| #   | Field            | Notes                                             |
+| --- | ---------------- | ------------------------------------------------- |
+| 0   | Show number      |                                                   |
+| 1   | AirDate          | `YYYY-MM-DD`                                      |
+| 2   | Extra Info       | TSV `comments`                                    |
+| 3   | Round            | `Jeopardy` / `Double Jeopardy` / `Final Jeopardy` |
+| 4   | Coords           | row,col position                                  |
+| 5   | Category         | on-air category (used for taxonomy lookup)        |
+| 6   | Order            |                                                   |
+| 7   | Value            | `$400`, `$2000`, etc.                             |
+| 8   | Daily Double     | `True` / `False`                                  |
+| 9   | Question         | **The clue shown** (TSV `answer`)                 |
+| 10  | Links            |                                                   |
+| 11  | Answer           | **The correct response** (TSV `question`)         |
+| 12  | Correct Attempts |                                                   |
+| 13  | Wrong Attempts   |                                                   |
 
 > **Warning:** TSV field names are reversed from natural language. In jwolle1 TSV, `answer` = clue shown, `question` = correct response. The importer maps accordingly.
 
@@ -127,13 +139,13 @@ After `smart_prep.py` runs, field 14 (`Frequency Score`) is added with the HTML 
 
 ## Tags Written by smart_prep.py
 
-| Tag | Example | Meaning |
-|---|---|---|
-| `freq:{tier}` | `freq:high` | Blended frequency tier |
-| `subject:{name}` | `subject:Literature` | Primary taxonomy subject |
-| `subcat:{name}` | `subcat:Shakespeare` | Normalized sub-category |
-| `subcat2:{name}` | `subcat2:Science` | Secondary domain (wordplay only) |
-| `era:{era}` | `era:recent` | Air date bucket (recent=2020+, modern=2010–2019, old=pre-2010) |
+| Tag              | Example              | Meaning                                                        |
+| ---------------- | -------------------- | -------------------------------------------------------------- |
+| `freq:{tier}`    | `freq:high`          | Blended frequency tier                                         |
+| `subject:{name}` | `subject:Literature` | Primary taxonomy subject                                       |
+| `subcat:{name}`  | `subcat:Shakespeare` | Normalized sub-category                                        |
+| `subcat2:{name}` | `subcat2:Science`    | Secondary domain (wordplay only)                               |
+| `era:{era}`      | `era:recent`         | Air date bucket (recent=2020+, modern=2010–2019, old=pre-2010) |
 
 Previous `freq:`, `subject:`, `subcat:`, `era:` tags are stripped and replaced on each run (idempotent).
 
@@ -155,18 +167,19 @@ tag:era:recent tag:freq:high           → recent + high-frequency (best study f
 
 ### Immediate (after classifier finishes)
 
-- [ ] **Re-run `consolidate_taxonomy.py`** on full 54K taxonomy to apply all rules cleanly
-- [ ] **Run `smart_prep.py`** → `jeopardy_scored.colpkg`
-- [ ] **Import into Anki** and verify: frequency badge on cards, tags searchable, review history intact
+- [x] **Re-run `consolidate_taxonomy.py`** on full 54,519 classified categories
+- [x] **Run `smart_prep.py`** → `jeopardy_scored.colpkg` with stake weighting
+- [ ] **Import into Anki** — import jeopardy_scored.colpkg and verify: frequency badge on cards, tags searchable, review history intact
 
 ### Score Improvements
 
-- [ ] **Round & value weighting** — Final Jeopardy clues are highest-stakes; currently weighted same as $200 Jeopardy. Proposed multipliers applied during frequency accumulation:
-  - Final Jeopardy: 2.0x
-  - Daily Double: 1.5x
-  - DJ $1600/$2000: 1.5x, DJ $1200: 1.3x
-  - J $800/$1000: 1.5x, J $600: 1.3x
-  - Implementation: read fields 3 (Round), 7 (Value), 8 (Daily Double) in `smart_prep.py`
+- [x] **Round & value weighting** — Final Jeopardy clues are highest-stakes. Stake multipliers applied during frequency accumulation:
+  - Final Jeopardy: 4.0x
+  - Daily Double (Double Jeopardy): 2.5x
+  - Daily Double (Jeopardy): 2.0x
+  - DJ $400–$2000: linear 1.1x–1.5x by value
+  - J $200–$1000: linear 0.6x–1.0x by value
+  - Implementation: `compute_stake_multiplier()` reads fields 3 (Round), 7 (Value), 8 (Daily Double) in `smart_prep.py` and multiplies `recency_weight(year)` during frequency accumulation.
 
 - [ ] **Consolidate "Other" subject** — currently 3,875 categories land in `Other` (mostly obscure one-off categories). Null out their `sub_category` so they fall back to answer-only scoring rather than dragging down the Other subject percentile.
 

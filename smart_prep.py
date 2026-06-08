@@ -36,10 +36,24 @@ from jeopardy_consts import (
     FIELD_AIR_DATE,
     FIELD_ANSWER,
     FIELD_CATEGORY,
+    FIELD_DAILY_DOUBLE,
+    FIELD_ROUND,
+    FIELD_VALUE,
     FREQ_FIELD_CONFIG_HEX,
     FREQ_FIELD_NAME,
     JEOPARDY_NOTETYPE_ID,
     RECENCY_WEIGHTS,
+    STAKE_DD_DJ,
+    STAKE_DD_J,
+    STAKE_DJ_MAX,
+    STAKE_DJ_MIN,
+    STAKE_DJ_VALUE_MAX,
+    STAKE_DJ_VALUE_MIN,
+    STAKE_FINAL_JEOPARDY,
+    STAKE_J_MAX,
+    STAKE_J_MIN,
+    STAKE_J_VALUE_MAX,
+    STAKE_J_VALUE_MIN,
     SUBJECT_OTHER,
     TIER_BADGE_COLORS,
     TIER_HIGH_MIN,
@@ -66,8 +80,8 @@ logger = logging.getLogger(__name__)
 Tier = Literal["high", "medium", "low", "rare"]
 
 # Per-note computed metadata used for scoring then writing.
-# (answer_key, subcat_key, subject, subcat_label, secondary_subject, year)
-NoteMeta = tuple[str, str, str, str, str, int]
+# (answer_key, subcat_key, subject, subcat_label, secondary_subject, year, stake_mult)
+NoteMeta = tuple[str, str, str, str, str, int, float]
 
 _DEFAULT_SUBCAT = "Miscellaneous"
 _TAG_SANITIZE_RE = re.compile(r"[^A-Za-z0-9]+")
@@ -93,6 +107,44 @@ def get_era_tag(year: int) -> str:
     if year >= ERA_MODERN_START:
         return "era:modern"
     return "era:old"
+
+
+def compute_stake_multiplier(
+    round_name: str, value_str: str, daily_double_str: str
+) -> float:
+    """Stake multiplier based on round, dollar value, and daily-double status.
+
+    Priority (highest → lowest): Final Jeopardy > DD (Double Jeopardy) > DD (Jeopardy)
+    > Double Jeopardy by value (1.1–1.5) > Jeopardy by value (0.6–1.0).
+    """
+    rnd = round_name.strip()
+    is_dd = daily_double_str.strip().lower() not in ("", "0", "false", "no")
+
+    if rnd == "Final Jeopardy":
+        return STAKE_FINAL_JEOPARDY
+    if is_dd:
+        return STAKE_DD_DJ if rnd == "Double Jeopardy" else STAKE_DD_J
+
+    try:
+        value = int(value_str.strip().lstrip("$").replace(",", ""))
+    except (ValueError, AttributeError):
+        value = 0
+
+    if rnd == "Double Jeopardy":
+        if value <= 0:
+            return (STAKE_DJ_MIN + STAKE_DJ_MAX) / 2
+        frac = min(
+            max(value - STAKE_DJ_VALUE_MIN, 0), STAKE_DJ_VALUE_MAX - STAKE_DJ_VALUE_MIN
+        ) / (STAKE_DJ_VALUE_MAX - STAKE_DJ_VALUE_MIN)
+        return STAKE_DJ_MIN + frac * (STAKE_DJ_MAX - STAKE_DJ_MIN)
+
+    # Jeopardy (or unknown round)
+    if value <= 0:
+        return (STAKE_J_MIN + STAKE_J_MAX) / 2
+    frac = min(
+        max(value - STAKE_J_VALUE_MIN, 0), STAKE_J_VALUE_MAX - STAKE_J_VALUE_MIN
+    ) / (STAKE_J_VALUE_MAX - STAKE_J_VALUE_MIN)
+    return STAKE_J_MIN + frac * (STAKE_J_MAX - STAKE_J_MIN)
 
 
 def sanitize_tag_value(value: str) -> str:
@@ -162,6 +214,9 @@ def read_note_meta(
         )
         answer_key = answer.casefold()
         subcat_key = subcat_label.casefold()
+        stake_mult = compute_stake_multiplier(
+            parts[FIELD_ROUND], parts[FIELD_VALUE], parts[FIELD_DAILY_DOUBLE]
+        )
         meta[note_id] = (
             answer_key,
             subcat_key,
@@ -169,6 +224,7 @@ def read_note_meta(
             subcat_label,
             secondary_subject,
             year,
+            stake_mult,
         )
     logger.info(f"Read metadata for {len(meta)} notes")
     return meta
@@ -197,8 +253,9 @@ def build_frequency_tables(
         _label,
         secondary_subject,
         year,
+        stake_mult,
     ) in meta.values():
-        weight = recency_weight(year)
+        weight = recency_weight(year) * stake_mult
         if answer_key:
             answer_score[answer_key] += weight
         subcat_score[subcat_key] += weight
@@ -265,7 +322,15 @@ def score_notes(
     cv: dict[int, float] = {}
     sv: dict[int, float] = {}
     for nid, m in meta.items():
-        answer_key, subcat_key, subject, subcat_label, secondary_subject, _year = m
+        (
+            answer_key,
+            subcat_key,
+            subject,
+            subcat_label,
+            secondary_subject,
+            _year,
+            _stake,
+        ) = m
         av[nid] = answer_score.get(answer_key, 0.0) if answer_key else 0.0
         cv[nid] = (
             0.0
@@ -403,7 +468,7 @@ def apply_scores_and_tags(
         if note_id not in scored:
             continue
         score, tier = scored[note_id]
-        _ak, _ck, subject, subcat_label, secondary_subject, year = meta[note_id]
+        _ak, _ck, subject, subcat_label, secondary_subject, year, _stake = meta[note_id]
         badge = badge_html(score, tier, subject)
 
         parts = flds.split("\x1f")

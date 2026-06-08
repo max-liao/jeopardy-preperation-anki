@@ -6,7 +6,29 @@ This document captures development-only coding preferences and hard constraints 
 
 ---
 
+## ⚠️ CRITICAL: Git Operations Policy
+
+**AGENT MUST NEVER COMMIT OR PUSH WITHOUT EXPLICIT USER AUTHORIZATION.**
+
+### Agents must NEVER:
+
+- Run `git commit` without explicit user request
+- Run `git push` or `git push --force` without explicit user authorization
+- Run history-rewriting tools (git filter-repo, git rebase -i, etc.) without explicit approval
+
+### If a git action is proposed:
+
+1. STOP and ask for explicit confirmation
+2. Explain what will be changed, what will be lost, and impact on branches/remotes
+3. WAIT for unambiguous user approval before proceeding
+4. Never execute `git push` or `git push --force` as part of an automated sequence
+
+Failure to follow this constraint results in permanent loss of uncommitted changes, rewrites shared history, and violates user autonomy.
+
+---
+
 ## Table of Contents
+
 - **Hard Constraints**
 - **Typing & Data-Shape Standards**
 - **Constants & Magic Values**
@@ -19,11 +41,11 @@ This document captures development-only coding preferences and hard constraints 
 - **Linting & Build Hygiene**
 - **Deliverables & Checklist**
 - **Dependency Management**
-- **Git operations — strict policy**
 
 ---
 
 ## **Hard Constraints (non-negotiable)**
+
 - No escape-hatch types (e.g., untyped dict soup, `Any` without justification).
   - If the shape is unclear, define an explicit `TypedDict`, `dataclass`, or `Protocol`.
 - No `# type: ignore[...]` or `# type: ignore` comments.
@@ -44,6 +66,7 @@ This document captures development-only coding preferences and hard constraints 
 ---
 
 ## **Typing & Data-Shape Standards**
+
 - Prefer explicit domain types over generic blobs.
 - Use discriminated unions / tagged variants for modes/kinds.
 - Avoid "stringly-typed" APIs; prefer typed constants/enums.
@@ -94,6 +117,7 @@ json.loads(resp_text)
 ---
 
 ## **Constants over Magic Strings and Numbers**
+
 - Replace repeated literal strings with constants.
 - Use `Enum` or module-level constants for known sets of values.
 - Replace magic numbers with named constants.
@@ -114,10 +138,12 @@ TIMEOUT_SECONDS = 30
 ---
 
 ## **DRY: Prefer Helpers**
+
 - Avoid long if/else chains—use `switch`-like dicts, handler maps, or strategy objects.
 - Extract common utilities into focused helper modules.
 
 ### Recommended Module Organization (for larger projects)
+
 1. `<domain>_consts.py` — ALL named constants, enums
 2. `<domain>_types.py` — ALL type definitions, TypedDicts, dataclasses, Protocols
 3. `<domain>_helpers.py` — Reusable pure functions operating on types
@@ -125,6 +151,7 @@ TIMEOUT_SECONDS = 30
 Do NOT mix constants/types/helpers across those files.
 
 ### Utility Function Modules
+
 - `string_helpers.py` — string normalization/comparison
 - `math_helpers.py` — numeric calculations and RNG
 - `date_helpers.py` — date/time utilities
@@ -133,6 +160,7 @@ Do NOT mix constants/types/helpers across those files.
 ---
 
 ## **Small, Composable Functions**
+
 - Prefer small single-purpose functions that are easy to unit test.
 - When functions grow, split into extraction, transform, validation, formatting.
 - Keep core logic pure; isolate side effects.
@@ -141,6 +169,7 @@ Do NOT mix constants/types/helpers across those files.
 ---
 
 ## **Validation & Invariants (Fail Fast)**
+
 - Enforce invariants centrally via validators/assertions.
 - Add runtime checks (dev/debug) and, where requested, unit tests.
 
@@ -156,6 +185,7 @@ def assert_positive_integer(name: str, value: int) -> int:
 ---
 
 ## **Testing Expectations (on request)**
+
 - Add/update unit tests only when explicitly requested.
 - For stochastic pipelines include deterministic/seeded tests.
 - Tests should be deterministic and focused on pure logic.
@@ -164,6 +194,7 @@ def assert_positive_integer(name: str, value: int) -> int:
 ---
 
 ## **Error Handling & Logging**
+
 - Prefer structured/typed errors over string parsing.
   - Define custom exception classes for domain-specific errors.
 - Log enough context (ids, inputs) without noise.
@@ -191,6 +222,7 @@ except ValidationError as e:
 ---
 
 ## **Performance & Correctness**
+
 - Correctness first. Avoid expensive work inside hot loops.
 - Profile before optimizing; don't guess at bottlenecks.
 - Use generators for large sequences; avoid materializing unnecessary lists.
@@ -198,6 +230,7 @@ except ValidationError as e:
 ---
 
 ## **Linting & Code Quality (required)**
+
 - Use the following tools as your standard (adjust based on project setup):
   - **Type checking**: `mypy` or `pyright` — strict mode
   - **Linting**: `ruff` (fast, comprehensive) or `flake8`
@@ -206,6 +239,7 @@ except ValidationError as e:
   - **Unused imports/vars**: `autoflake` or `ruff` with `unused-imports` rule
 
 Before finishing changes:
+
 1. Run `mypy --strict` or `pyright` and ensure no errors
 2. Run `ruff check .` (or equivalent linter)
 3. Run `black .` to auto-format (or ensure it passes `--check`)
@@ -234,6 +268,7 @@ repos:
 ---
 
 ## **Compile/Build Hygiene (required)**
+
 Before finishing, run the repo's standard validation commands and ensure they pass.
 For Python projects, typical commands are:
 
@@ -259,6 +294,7 @@ pytest tests/
 ---
 
 ## **What to Deliver With Each Change**
+
 - Short implementation note: what changed, where, and why.
 - How to validate: exact commands to run and expected output.
 - Tests added/updated (only if requested) and what they cover.
@@ -267,6 +303,7 @@ pytest tests/
 ---
 
 ## **Checklist (self-verify before finishing)**
+
 - [ ] No escape-hatch types used (e.g., untyped dicts, bare `Any`)
 - [ ] No unused variables/imports
 - [ ] No duplicated logic left unrefactored
@@ -280,10 +317,13 @@ pytest tests/
 - [ ] Code formatting passes (`black --check`)
 - [ ] Code compiles/runs successfully using repo-standard commands
 - [ ] Clear validation steps provided
+- [ ] **NO commits made without explicit user authorization**
+- [ ] **NO pushes made to remote**
 
 ---
 
 ## **File Migrations & Refactoring**
+
 - When moving/renaming files, update all imports in one batch.
 - Verify imports are resolvable via `python -c "import your_module"` or similar.
 - Delete old file only after verifying no consumers remain.
@@ -292,62 +332,29 @@ pytest tests/
 ---
 
 ## **Dependency Management (pip/PDM/Poetry)**
+
 Choose one and stick with it:
 
 ### PDM (recommended for this workspace)
+
 - Use `pdm install`, `pdm add`, `pdm remove` for dependency operations.
 - `pdm.lock` is the canonical lock file.
 - Use the venv managed by PDM (usually in `.venv/`).
 
 ### pip + requirements.txt
+
 - Use `pip install -r requirements.txt` for reproducible installs.
 - Pin versions: `package==1.2.3` (not `package>=1.2.3`).
 - Keep `requirements-dev.txt` for development-only dependencies.
 
 ### Poetry
+
 - Use `poetry add`, `poetry remove` for dependency operations.
 - `poetry.lock` is the canonical lock file.
 
 ---
 
-## **GIT OPERATIONS — AGENT MUST NEVER COMMIT OR FORCE-PUSH WITHOUT EXPLICIT USER AUTHORIZATION**
-
-This is a critical, non-negotiable rule for automated agents.
-
-### Agents must NEVER:
-- Run `git commit` without explicit user request
-- Run `git push` or `git push --force` without explicit user authorization
-- Run history-rewriting tools (git filter-repo, git rebase -i, etc.) without explicit approval
-
-### If a git action is proposed:
-1. STOP and ask for explicit confirmation
-2. Explain what will be changed, what will be lost, and impact on branches/remotes
-3. WAIT for unambiguous user approval before proceeding
-4. Never execute `git push` or `git push --force` as part of an automated sequence
-
-Failure to follow this constraint:
-- Results in permanent loss of uncommitted changes
-- Rewrites shared history and forces re-clones for all collaborators
-- Violates user autonomy over their repository
-- Is considered a critical operational failure
-
-Example (FORBIDDEN):
-```bash
-git filter-repo --path old_module/ --invert-paths --force  # ✗ No permission
-git commit -m "..."                                          # ✗ No permission
-git push origin main --force                                # ✗ NO PERMISSION — CRITICAL VIOLATION
-```
-
-Example (CORRECT):
-1. Explain the plan: "To clean up history, I can run git filter-repo to remove old_module/..."
-2. STOP and wait for explicit user approval
-3. Only proceed if user says "yes, do it" or similar
-4. Before any commit/push, ask again: "Ready to commit and push? [y/n]"
-5. Execute only after confirmed approval
-
----
-
-**Ways to use fewer tokens when working with Claude:**
+## **Ways to use fewer tokens when working with Claude**
 
 **1. Switch models strategically**
 Start every session on Sonnet. Only switch to Opus when you genuinely need deep analysis or complex refactoring. Drop to Haiku for mechanical stuff like quick lookups, formatting, or renaming.
@@ -369,4 +376,4 @@ Being specific in your prompts about which files to look at reduces unnecessary 
 
 ---
 
-*End of file.*
+_End of file._

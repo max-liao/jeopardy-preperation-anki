@@ -113,6 +113,22 @@ SUBJECTS: Final[tuple[str, ...]] = (
 )
 SUBJECT_OTHER: Final[str] = "Other"
 
+# Stake multipliers applied during frequency accumulation (multiplied with recency weight).
+# Priority tiers (highest → lowest):
+#   Final Jeopardy > DD (Double Jeopardy) > DD (Jeopardy)
+#   > DJ by value (1.1–1.5) > J by value (0.6–1.0)
+STAKE_FINAL_JEOPARDY: Final[float] = 4.0
+STAKE_DD_DJ: Final[float] = 2.5  # Daily Double in Double Jeopardy
+STAKE_DD_J: Final[float] = 2.0  # Daily Double in Jeopardy
+STAKE_DJ_MIN: Final[float] = 1.1  # Double Jeopardy at $400
+STAKE_DJ_MAX: Final[float] = 1.5  # Double Jeopardy at $2000
+STAKE_DJ_VALUE_MIN: Final[int] = 400
+STAKE_DJ_VALUE_MAX: Final[int] = 2000
+STAKE_J_MIN: Final[float] = 0.6  # Jeopardy at $200
+STAKE_J_MAX: Final[float] = 1.0  # Jeopardy at $1000
+STAKE_J_VALUE_MIN: Final[int] = 200
+STAKE_J_VALUE_MAX: Final[int] = 1000
+
 # Classifier settings
 CLASSIFY_BATCH_SIZE: Final[int] = 300
 CLASSIFY_MODEL_DEFAULT: Final[str] = "haiku"
