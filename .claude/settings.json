@@ -1,0 +1,28 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(unzip -l /home/max/Documents/Jeopardy/collection-2026-06-07@15-43-15.colpkg)",
+      "Read(//tmp/**)",
+      "Bash(unzip -q /home/max/Documents/Jeopardy/collection-2026-06-07@15-43-15.colpkg meta)",
+      "Bash(unzip -q /home/max/Documents/Jeopardy/collection-2026-06-07@15-43-15.colpkg collection.anki2)",
+      "Bash(sqlite3 collection.anki2 \".tables\")",
+      "Bash(sqlite3 collection.anki2 \"SELECT COUNT\\(*\\) as total_notes FROM notes;\")",
+      "Bash(sqlite3 collection.anki2 \"SELECT flds FROM notes LIMIT 1;\")",
+      "Bash(python3 -m mypy *)",
+      "Bash(python3 -m ruff *)",
+      "Bash(python3 -m black *)",
+      "Bash(python3 -m py_compile *)",
+      "Bash(python3 -m pytest *)",
+      "Bash(pdm run *)",
+      "Bash(python -m mypy *)",
+      "Bash(python -m ruff *)",
+      "Bash(python -m black *)",
+      "Bash(curl -sL*)",
+      "Bash(curl -s *)",
+      "Bash(curl -L*)",
+      "Bash(wget *)",
+      "Bash(cat *)",
+      "Bash(cat >*)"
+    ]
+  }
+}
