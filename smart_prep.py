@@ -4,16 +4,19 @@
 For a collection that already spans 1984–2025 (see update_collection.py) and a
 category taxonomy (see classify_categories.py), this:
 
-  1. Computes a recency-weighted frequency for each card's exact ANSWER, its
-     SUB-CATEGORY, and its broad SUBJECT.
+  1. Computes a recency-weighted, stake-weighted frequency for each card's exact
+     ANSWER, its SUB-CATEGORY, and its broad SUBJECT.
   2. Blends those three (as percentiles) into a single 0-100 frequency score and
      a tier (freq:high/medium/low/rare).
   3. Adds a "Frequency Score" field to the Jeopardy note type + renders it on the
      card as a colored badge, and tags each note (freq:/subject:/subcat:/era:).
+  4. Strips all non-Jeopardy decks and outputs a single-deck .apkg that merges
+     cleanly into an existing Anki collection without replacing it.
 
 Usage:
-  python smart_prep.py SOURCE.colpkg OUTPUT.colpkg
+  python smart_prep.py SOURCE.colpkg OUTPUT.apkg
       [--taxonomy category_taxonomy.json] [--analysis-only]
+      [--deck-name "Jeopardy Smart Prep"]
 """
 
 import argparse
@@ -21,6 +24,7 @@ import bisect
 import json
 import logging
 import re
+import shutil
 import sqlite3
 import sys
 import tempfile
@@ -67,8 +71,10 @@ from jeopardy_consts import (
 from jeopardy_db_helpers import (
     connect_anki,
     extract_colpkg,
+    pack_apkg,
     protobuf_prepend_to_field1,
-    repack_colpkg,
+    rename_deck,
+    strip_foreign_decks,
 )
 
 logging.basicConfig(
@@ -547,11 +553,29 @@ def main() -> None:
         description="Blended frequency scoring + tagging for the Jeopardy deck"
     )
     parser.add_argument("source", help="Source .colpkg (1984–2025, post-merge)")
-    parser.add_argument("output", help="Output .colpkg")
+    parser.add_argument(
+        "output",
+        nargs="?",
+        help="Output .apkg (required unless --live-db is set)",
+    )
+    parser.add_argument(
+        "--live-db",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Write scores + tags directly to a live collection.anki2 instead of "
+            "producing an .apkg. Preserves all manual edits; Anki must be closed."
+        ),
+    )
     parser.add_argument(
         "--taxonomy",
         default="category_taxonomy.json",
         help="Category taxonomy JSON (default: category_taxonomy.json)",
+    )
+    parser.add_argument(
+        "--deck-name",
+        default="Jeopardy Smart Prep",
+        help="Name for the output deck (default: 'Jeopardy Smart Prep')",
     )
     parser.add_argument(
         "--analysis-only",
@@ -560,12 +584,27 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    if not args.analysis_only and not args.output and not args.live_db:
+        parser.error("output is required unless --live-db or --analysis-only is set")
+
     source_path = Path(args.source)
-    output_path = Path(args.output)
     taxonomy_path = Path(args.taxonomy)
     if not source_path.exists():
         logger.error(f"Source not found: {source_path}")
         sys.exit(1)
+
+    live_db_path: Path | None = None
+    if args.live_db:
+        live_db_path = Path(args.live_db).expanduser().resolve()
+        if not live_db_path.exists():
+            logger.error(f"Live DB not found: {live_db_path}")
+            sys.exit(1)
+        wal_path = live_db_path.with_name(live_db_path.name + "-wal")
+        if wal_path.exists() and wal_path.stat().st_size > 0:
+            logger.error(
+                f"Anki appears to be running (WAL file present: {wal_path}). Close Anki first."
+            )
+            sys.exit(1)
 
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -590,12 +629,34 @@ def main() -> None:
                 meta, answer_score, subcat_score, subject_score, secondary_subject_score
             )
             print_report(meta, scored, subject_score, secondary_subject_score)
+            conn.close()
 
             if args.analysis_only:
                 logger.info("Analysis-only mode; exiting")
-                conn.close()
                 return
 
+            if live_db_path is not None:
+                # Refresh mode: write badge + tags directly to the live collection.
+                # Only fields 0–13 (user-editable content) are never touched.
+                backup_path = live_db_path.with_name(live_db_path.name + ".bak")
+                shutil.copy2(live_db_path, backup_path)
+                logger.info(f"Backed up live DB to {backup_path}")
+
+                live_conn = connect_anki(live_db_path)
+                if get_jeopardy_field_count(live_conn) < TOTAL_FIELDS:
+                    logger.error("Unexpected field count in live DB; aborting")
+                    live_conn.close()
+                    sys.exit(1)
+                appended = add_frequency_field_and_template(live_conn)
+                apply_scores_and_tags(live_conn, meta, scored, appended)
+                live_conn.commit()
+                live_conn.close()
+                logger.info("✓ Scores + tags written to live collection (no import needed)")
+                return
+
+            # Initial setup mode: build a fresh .apkg for first-time import.
+            output_path = Path(args.output)
+            conn = connect_anki(db_path)
             if get_jeopardy_field_count(conn) < TOTAL_FIELDS:
                 logger.error("Unexpected field count; aborting")
                 conn.close()
@@ -603,13 +664,29 @@ def main() -> None:
 
             appended = add_frequency_field_and_template(conn)
             apply_scores_and_tags(conn, meta, scored, appended)
+
+            # Find the Jeopardy deck, rename it, then strip all other decks so
+            # the output .apkg contains only the new Jeopardy Smart Prep deck.
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT id FROM decks WHERE name LIKE '%Jeopardy%' ORDER BY id LIMIT 1"
+            )
+            row = cursor.fetchone()
+            if not row:
+                logger.error("Could not find Jeopardy deck; aborting")
+                conn.close()
+                sys.exit(1)
+            jeopardy_deck_id = int(row[0])
+
+            rename_deck(conn, jeopardy_deck_id, args.deck_name)
+            strip_foreign_decks(conn, jeopardy_deck_id)
+
             conn.commit()
             conn.close()
 
-            extract_dir = tmp_path / "extract"
-            logger.info(f"Repacking to {output_path}")
-            repack_colpkg(db_path, extract_dir, output_path)
-            logger.info(f"✓ Success! Scored deck written to {output_path}")
+            logger.info(f"Packing .apkg to {output_path}")
+            pack_apkg(db_path, output_path)
+            logger.info(f"✓ Success! Deck '{args.deck_name}' written to {output_path}")
     except Exception as exc:
         logger.exception(f"Error: {exc}")
         sys.exit(1)

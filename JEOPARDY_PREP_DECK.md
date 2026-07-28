@@ -1,35 +1,40 @@
 # Jeopardy Smart Prep — Project Documentation
 
-## Pipeline Status
-
-```
-Step 1: Merge post-2019 clues
-  update_collection.py  ✅ DONE
-  → updated.colpkg (1984-09-10 → 2025-07-25, 452,268 notes)
-  → 81,652 clues added from jwolle1/jeopardy_clue_dataset (Season 1–41)
-  → 7,200 reviewed cards + full revlog preserved
-
-Step 2: Classify categories via LLM
-  classify_categories.py  ✅ DONE (54,519/54,519 classifications complete)
-  → category_taxonomy.json with all categories classified
-  → Sorted by card frequency: highest-impact categories first
-
-Step 3: Consolidate taxonomy
-  consolidate_taxonomy.py  ✅ DONE
-  → Reduced 13,529 → 13,378 unique sub-categories (151 temporal merges)
-  → Stripped temporal prefixes: "1980s Culture" → "Culture"
-
-Step 4: Score + tag cards
-  smart_prep.py  ✅ DONE
-  → Created jeopardy_scored.colpkg (452,268 notes scored)
-  → Stake weighting: Final Jeopardy 4.0x, DD 2.5x/2.0x, value-based scaling
-  → Tier distribution: 10.1% high, 58.5% medium, 29.4% low, 2.0% rare
-
-Step 5: Import into Anki
-  ⏳ User step — import jeopardy_scored.colpkg into Anki desktop
-```
-
 **Season 42 (Sept 2025+) not yet included.** Acceptable for now — Season 41 data is sufficient for recency weighting.
+
+---
+
+## Refreshing the Deck
+
+There are two modes depending on whether this is your first time setting up or a subsequent refresh.
+
+### First-time setup
+
+```bash
+# 1. Build the scored .apkg (Anki can be open)
+cd ~/Documents/jeopardy-preperation-anki
+python smart_prep.py jeopardy_smart_prep.colpkg jeopardy_smart_prep.apkg
+
+# 2. Import into Anki
+#    File → Import → select jeopardy_smart_prep.apkg
+#    Tick "Import even if existing note has same key"
+
+# 3. Close Anki, then apply card ordering
+python study_optimizer.py
+```
+
+### Refreshing (already studying — manual edits preserved)
+
+Use `--live-db` to write scores and tags directly to your live collection, **skipping the import step entirely**. Your manual card edits are never touched — only the frequency badge (field 14) and `freq:`/`subject:`/`subcat:`/`era:` tags are updated.
+
+```bash
+# Close Anki first, then:
+python smart_prep.py jeopardy_smart_prep.colpkg \
+    --live-db "~/.local/share/Anki2/User 1/collection.anki2"
+python study_optimizer.py
+```
+
+A backup of your collection DB is written to `collection.anki2.bak` automatically by both scripts before any changes.
 
 ---
 

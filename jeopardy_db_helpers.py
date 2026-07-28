@@ -348,6 +348,58 @@ def get_max_new_due(conn: sqlite3.Connection) -> int:
     return max_due
 
 
+def strip_foreign_decks(conn: sqlite3.Connection, keep_deck_id: int) -> None:
+    """Delete all decks except keep_deck_id and their cards, revlog, and orphaned notes.
+
+    Args:
+        conn: SQLite connection (unicase collation must be registered)
+        keep_deck_id: The deck ID to preserve
+    """
+    cursor = conn.cursor()
+    cursor.execute("SELECT id FROM cards WHERE did != ?", (keep_deck_id,))
+    foreign_cids = [row[0] for row in cursor.fetchall()]
+    if foreign_cids:
+        cursor.executemany(
+            "DELETE FROM revlog WHERE cid = ?", [(c,) for c in foreign_cids]
+        )
+        cursor.execute("DELETE FROM cards WHERE did != ?", (keep_deck_id,))
+    cursor.execute("DELETE FROM notes WHERE id NOT IN (SELECT nid FROM cards)")
+    cursor.execute("DELETE FROM decks WHERE id != ?", (keep_deck_id,))
+    conn.commit()
+    cursor.execute("SELECT COUNT(*) FROM notes")
+    note_count = cursor.fetchone()[0]
+    logger.info(f"Stripped foreign decks — {note_count} notes remain")
+
+
+def rename_deck(conn: sqlite3.Connection, deck_id: int, new_name: str) -> None:
+    """Rename a deck by ID.
+
+    Args:
+        conn: SQLite connection (unicase collation must be registered)
+        deck_id: Deck to rename
+        new_name: New deck name
+    """
+    conn.execute("UPDATE decks SET name = ? WHERE id = ?", (new_name, deck_id))
+    conn.commit()
+    logger.info(f"Renamed deck {deck_id} → '{new_name}'")
+
+
+def pack_apkg(db_path: Path, output: Path) -> None:
+    """Package a plain SQLite database as an importable .apkg file.
+
+    The .apkg format (no 'meta' file, collection.anki2 entry) causes Anki to
+    merge the package into the existing collection instead of replacing it.
+
+    Args:
+        db_path: Path to the plain (uncompressed) collection.anki2 database
+        output: Output .apkg path
+    """
+    with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.write(db_path, arcname="collection.anki2")
+        zf.writestr("media", "{}")
+    logger.debug(f"Packed .apkg to {output}")
+
+
 def cleanup_tmpdir(tmp_dir: Path) -> None:
     """Remove temporary directory.
 

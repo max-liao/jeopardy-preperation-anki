@@ -129,6 +129,22 @@ STAKE_J_MAX: Final[float] = 1.0  # Jeopardy at $1000
 STAKE_J_VALUE_MIN: Final[int] = 200
 STAKE_J_VALUE_MAX: Final[int] = 1000
 
+# Study optimizer — ease factor tuning and performance tagging
+EASE_BASE: Final[int] = 2500
+EASE_MIN: Final[int] = 1300
+EASE_MAX: Final[int] = 4000
+# Penalty subtracted from EASE_BASE per freq tier (negative = bonus for rare cards)
+FREQ_EASE_PENALTY: Final[dict[str, int]] = {"high": 600, "medium": 300, "low": 0, "rare": -200}
+# Penalty subtracted from EASE_BASE per weakness tier
+WEAKNESS_EASE_PENALTY: Final[dict[str, int]] = {"weak": 600, "medium": 300, "strong": 0}
+PERF_WEAK_THRESHOLD: Final[float] = 0.60
+PERF_STRONG_THRESHOLD: Final[float] = 0.80
+# Bayesian prior for sparse categories (5 ghost reviews at 70% accuracy)
+PRIOR_ACCURACY: Final[float] = 0.70
+PRIOR_WEIGHT: Final[int] = 5
+MIN_REVIEWS_FOR_CARD_PERF: Final[int] = 3
+ANKI_COLLECTION_PATH: Final[str] = "~/.local/share/Anki2/User 1/collection.anki2"
+
 # Classifier settings
 CLASSIFY_BATCH_SIZE: Final[int] = 300
 CLASSIFY_MODEL_DEFAULT: Final[str] = "haiku"
