@@ -25,16 +25,46 @@ python study_optimizer.py
 
 ### Refreshing (already studying — manual edits preserved)
 
-Use `--live-db` to write scores and tags directly to your live collection, **skipping the import step entirely**. Your manual card edits are never touched — only the frequency badge (field 14) and `freq:`/`subject:`/`subcat:`/`era:` tags are updated.
+`--live-db` reads **and** writes the live collection, skipping the import step entirely. No `.colpkg` is involved: scoring is computed from the collection itself, so your manual card edits are what gets scored, and there is no way for a stale source file to drift out of sync.
+
+Your card content is never touched — only the frequency badge (field 14) and the `freq:`/`subject:`/`subcat:`/`era:` tags.
 
 ```bash
 # Close Anki first, then:
-python smart_prep.py jeopardy_smart_prep.colpkg \
-    --live-db "~/.local/share/Anki2/User 1/collection.anki2"
-python study_optimizer.py
+python smart_prep.py --live-db "~/.local/share/Anki2/User 1/collection.anki2"
+python archive_dead_cards.py     # park dead cards in the Archive subdeck
+python study_optimizer.py        # ease tuning + weakness-weighted new-card order
 ```
 
-A backup of your collection DB is written to `collection.anki2.bak` automatically by both scripts before any changes.
+Each script writes `collection.anki2.bak` before making changes, and refuses to run while Anki is open.
+
+> **After a refresh, your next AnkiWeb sync will likely require a full sync.** Choose **Upload to AnkiWeb**, then sync your other devices — otherwise a stale remote copy can overwrite the rescored collection.
+
+### ⚠️ AnkiWeb's 300 MB ceiling
+
+AnkiWeb rejects collections over **314,572,800 bytes uncompressed**. With ~452K notes, anything written to *every* note costs ~450 KB per byte, so this limit is easy to trip:
+
+- **Badge markup lives in the template, not the note.** The badge is `<b class="fq h">85</b>` (22 bytes) and `BADGE_STYLE_BLOCK` supplies the CSS once. An earlier inline-styled version was 174 bytes/note = **79 MB** on its own and broke syncing. Never inline styles into the badge.
+- **Default-valued tags are not written.** `perf:new` (99.8% of the deck) and `perfsubcat:strong` are omitted; their absence means the same thing. Restoring them costs ~20 MB.
+- **VACUUM after bulk updates.** Rewriting 452K notes leaves large free-page churn that only VACUUM reclaims — it recovered **134 MB** (382 MB → 248 MB) in one pass.
+
+```bash
+python -c "from pathlib import Path; from jeopardy_db_helpers import connect_anki; \
+c=connect_anki(Path.home()/'.local/share/Anki2/User 1/collection.anki2'); c.execute('VACUUM'); c.close()"
+```
+
+Anki's **Tools → Check Database** performs an equivalent compaction from the GUI.
+
+### Deck layout
+
+Everything lives in one deck. The legacy split (a separate unscored `Jeopardy` deck) was merged by `consolidate_decks.py`; that script is idempotent and does nothing once merged.
+
+```
+Jeopardy Smart Prep            active study queue
+Jeopardy Smart Prep::Archive   dead cards — out of rotation, never deleted
+```
+
+`python archive_dead_cards.py --restore` moves every archived card back.
 
 ---
 
@@ -45,6 +75,8 @@ A backup of your collection DB is written to `collection.anki2.bak` automaticall
 | `update_collection.py`    | Merges jwolle1 TSV clues (post-2019) into .colpkg                                         |
 | `classify_categories.py`  | LLM-classifies on-air categories → `category_taxonomy.json`                               |
 | `consolidate_taxonomy.py` | Post-processes taxonomy: merges synonyms, strips temporal noise, injects manual overrides |
+| `consolidate_decks.py`    | One-time merge of the legacy `Jeopardy` deck into `Jeopardy Smart Prep` (idempotent)      |
+| `archive_dead_cards.py`   | Moves dead cards to the Archive subdeck; `--restore` reverses it                          |
 | `smart_prep.py`           | Blended frequency scoring + field/template + tag writes                                   |
 | `jeopardy_consts.py`      | All constants: field indices, tier thresholds, recency weights, subjects                  |
 | `jeopardy_types.py`       | TypedDicts: `CategoryClassification`, `NoteRow`, `AnkiCardRow`, etc.                      |
@@ -58,13 +90,30 @@ A backup of your collection DB is written to `collection.anki2.bak` automaticall
 
 ### Blended Frequency Score (0–100)
 
+Scoring runs in three stages.
+
+**1 — Topic blend.** How much does this material come up at all?
+
 ```
-score = 0.40 × answer_percentile
+topic = 0.40 × answer_percentile
       + 0.35 × sub_category_percentile
       + 0.25 × max(subject_percentile, secondary_subject_percentile)
 ```
 
-Each component is the **percentile rank** of that note's **stake-weighted recency frequency** across all notes. The stake multiplier reflects round difficulty (Final Jeopardy > Daily Double > regular) and dollar value (higher = harder). Result scaled to 0–100, mapped to tier:
+Each component is the **percentile rank** of that note's **stake-weighted recency frequency** across all notes. The stake multiplier reflects round difficulty (Final Jeopardy > Daily Double > regular) and dollar value (higher = harder).
+
+**2 — Relevance decay.** Is it *still* being asked?
+
+```
+raw = topic × liveness_weight(answer_last_seen_year) × card_age_weight(card_air_year)
+```
+
+- **`liveness_weight`** (1.00 → 0.15) keys off the most recent year that answer appeared *anywhere in the corpus*. This is the primary "no longer relevant" signal: a topic that stopped appearing in 1994 is retired no matter how often it came up back then. Measured effect: mean score 64.4 for topics last seen 2020+, versus 3.0 for pre-2000.
+- **`card_age_weight`** (1.00 → 0.70) keys off the card's own air year and is deliberately much gentler. An old clue about a live topic keeps most of its value — a 1993 Geography card still scores ~52.8 on average.
+
+**3 — Re-percentile.** The decayed values are ranked again, so the published 0–100 is a true percentile: a score of 85 means "more study-worthy than 85% of the deck". Tier thresholds therefore partition the deck at a stable 30 / 30 / 25 / 15.
+
+> **Answer keys are normalized** (`normalize_answer`) before recurrence and liveness are computed: parentheticals and leading articles are stripped, and plural forms fold into the singular *only when both spellings actually occur*. Matching raw text instead made live topics look retired — "talons" last appears in 1999, but "talon" ran through 2025.
 
 | Tier   | Score | Tag           |
 | ------ | ----- | ------------- |
@@ -96,11 +145,13 @@ Each note's frequency weight is multiplied by a stake multiplier reflecting the 
 
 The multiplier is computed per-note by `compute_stake_multiplier()` in `smart_prep.py`, reading fields 3 (Round), 7 (Value), and 8 (Daily Double). For non-Daily-Double clues in regular rounds, the multiplier scales linearly with dollar value within that round (no overlap between rounds).
 
-### secondary_subject (Wordplay + Domain)
+### secondary_subject (Wordplay + Domain) — ⚠️ currently inert
 
-Some categories use a **wordplay format** (Before & After, Rhyme Time, Anagrams…) to test a **knowledge domain**. Example: `SCIENCE BEFORE & AFTER` → `subject="Wordplay & Language"`, `secondary_subject="Science"`.
+The intent: categories using a **wordplay format** (Before & After, Rhyme Time, Anagrams…) to test a **knowledge domain** — `SCIENCE BEFORE & AFTER` → `subject="Wordplay & Language"`, `secondary_subject="Science"` — should get credit for the domain they actually test, via `max(subject_score, secondary_subject_score)` and a `subcat2:` tag.
 
-These cards are tagged with both `subject:Wordplay_Language` and `subcat2:Science`, and the subject component uses `max(subject_score, secondary_subject_score)` so the card gets credit for the knowledge domain it actually tests.
+**The scoring and tagging code for this works, but no data feeds it.** All 54,519 entries in `category_taxonomy.json` have an empty `secondary_subject`, so the `max()` never fires and `subcat2:` is never written. The classifier prompt does not currently produce the field.
+
+This matters: Wordplay & Language is **22% of all recent-game clue volume**, the single largest subject, and much of it is a domain quiz wearing a wordplay costume. Populating this is the highest-value outstanding improvement — it requires a `classify_categories.py` prompt change plus a re-run.
 
 ### Taxonomy Pipeline
 
@@ -151,8 +202,30 @@ After `smart_prep.py` runs, field 14 (`Frequency Score`) is added with the HTML 
 | `subcat:{name}`  | `subcat:Shakespeare` | Normalized sub-category                                        |
 | `subcat2:{name}` | `subcat2:Science`    | Secondary domain (wordplay only)                               |
 | `era:{era}`      | `era:recent`         | Air date bucket (recent=2020+, modern=2010–2019, old=pre-2010) |
+| `archived:{why}` | `archived:dead-topic` | Why the card was archived (`archive_dead_cards.py`)           |
+| `perf:{tier}`    | `perf:weak`          | Your accuracy on this card (`study_optimizer.py`)              |
+| `perfsubcat:{t}` | `perfsubcat:weak`    | Your accuracy across the whole sub-category                    |
 
 Previous `freq:`, `subject:`, `subcat:`, `era:` tags are stripped and replaced on each run (idempotent).
+
+---
+
+## Archive Rules
+
+`archive_dead_cards.py` moves genuinely dead cards to the Archive subdeck. Nothing is deleted, and `--restore` reverses everything. Cards you have **already reviewed** and anything aired **2020 or later** are always exempt.
+
+| Reason       | Rule                                                        | Cards  |
+| ------------ | ----------------------------------------------------------- | ------ |
+| `dead-topic` | Answer topic not seen anywhere since 2005                   | 26,182 |
+| `duplicate`  | Near-verbatim restatement of another clue (newest is kept)  | 7,791  |
+| `one-off`    | Answer never repeats in 42 seasons, and clue predates 2010  | 6,725  |
+| `stale`      | Time-anchored wording, aired pre-2015                       | 1,579  |
+| `malformed`  | Answer is empty or punctuation-only, or the clue is blank   | 609    |
+
+Two traps that cost real accuracy here, both now guarded:
+
+- **"this year" / "this month" is not a time anchor.** In Jeopardy phrasing, `this X` is the self-referential pointer to the thing being asked for ("the carnation is the flower for this month"). Matching it flagged tens of thousands of timeless clues, so those patterns are deliberately excluded from the stale regex — only genuine anchors (`current`, `recently`, `-elect`, `as of 1998`, …) count. `current events` is excluded as an idiom.
+- **Short answers are not malformed.** `9`, `H` and `4` are all real responses. Only empty or punctuation-only answers qualify.
 
 ---
 
@@ -162,19 +235,55 @@ Previous `freq:`, `subject:`, `subcat:`, `era:` tags are stripped and replaced o
 tag:freq:high                          → highest-priority cards
 tag:freq:high tag:subject:Literature   → Literature cards worth studying most
 tag:era:recent                         → 2020+ questions only
-tag:subcat2:Science                    → wordplay clues that test Science knowledge
 tag:era:recent tag:freq:high           → recent + high-frequency (best study focus)
+deck:"Jeopardy Smart Prep::Archive"    → review what was archived
+tag:archived:dead-topic                → archived because the topic retired
+-deck:*Archive* tag:perfsubcat:weak    → active cards in your weak sub-categories
 ```
+
+Targeting the measured weak spots (see *Study Performance* below):
+
+```
+tag:perfsubcat:weak tag:freq:high      → weak AND frequently asked — best ROI
+tag:subject:People tag:freq:high       → the weakest subject cluster
+tag:subcat:U_S_Presidents              → 46.4% accuracy, worst measured
+```
+
+---
+
+## Study Performance (measured 2026-07-28)
+
+From 6,037 reviews across 2,108 cards. Accuracy is Bayesian-blended (prior 70% @ 5 reviews) so thin categories are not over-read.
+
+**Weakest subjects, weighted by share of recent-game clue volume:**
+
+| Subject             | Accuracy | Share of 2020+ clues |
+| ------------------- | -------- | -------------------- |
+| Wordplay & Language | 82.9%    | **22.0%**            |
+| Literature          | **70.5%**| 8.6%                 |
+| Film & TV           | **72.4%**| 7.8%                 |
+| History             | 76.1%    | 8.2%                 |
+| Music               | 75.4%    | 6.0%                 |
+| Science             | 86.6%    | 5.5%                 |
+
+**The dominant pattern is people-based recall.** The worst sub-categories cluster hard: U.S. Presidents 46.4%, Americans 47.7%, Politicians 40.9%, People 50.0%, European Royalty 55.0%, American Women 54.2%, Historical Figures 58.7%, Biblical Characters 53.1%. Naming *who did a thing* is the weak spot, not the thing itself.
+
+Geography is the clear strength (Cities 94.2%, Countries 87.5%, Rivers & Lakes 80.4%) — coast there.
+
+**Scale reality:** at ~78 cards/day you will see ~28,470 cards in a year, roughly 7% of the active deck. Ordering quality matters far more than deck size; the deck will never be "finished".
 
 ---
 
 ## TODOs — Further Optimizations
 
-### Immediate (after classifier finishes)
+### Done
 
 - [x] **Re-run `consolidate_taxonomy.py`** on full 54,519 classified categories
-- [x] **Run `smart_prep.py`** → `jeopardy_scored.colpkg` with stake weighting
-- [ ] **Import into Anki** — import jeopardy_scored.colpkg and verify: frequency badge on cards, tags searchable, review history intact
+- [x] **Run `smart_prep.py`** with stake weighting
+- [x] **Consolidate decks** — the legacy `Jeopardy` deck (370,616 cards, never scored) merged into `Jeopardy Smart Prep`; all 452,268 notes now carry a badge and tags
+- [x] **Topic-liveness + card-age decay** — outdated material now scores low; see Algorithm above
+- [x] **Archive dead cards** — 42,886 cards (9.5%) parked in the Archive subdeck
+- [x] **Weakness-weighted card ordering** — `study_priority()` in `study_optimizer.py`
 
 ### Score Improvements
 
@@ -185,6 +294,12 @@ tag:era:recent tag:freq:high           → recent + high-frequency (best study f
   - DJ $400–$2000: linear 1.1x–1.5x by value
   - J $200–$1000: linear 0.6x–1.0x by value
   - Implementation: `compute_stake_multiplier()` reads fields 3 (Round), 7 (Value), 8 (Daily Double) in `smart_prep.py` and multiplies `recency_weight(year)` during frequency accumulation.
+
+### Next up (highest value first)
+
+- [ ] **Populate `secondary_subject`** — the single biggest remaining win. Wordplay & Language is 22% of recent clue volume and much of it is a domain quiz in disguise, but the field is empty for all 54,519 categories so the feature is inert (see above). Needs a `classify_categories.py` prompt change + re-run.
+
+- [ ] **Fix the `Unclassified` bucket** — it is 11.1% of recent-game clue volume and the largest single group in your review history (392 reviews), yet those cards earn no topic credit in scoring and cannot be targeted by tag. Worth a focused classification pass over the highest-volume unclassified categories.
 
 - [ ] **Consolidate "Other" subject** — currently 3,875 categories land in `Other` (mostly obscure one-off categories). Null out their `sub_category` so they fall back to answer-only scoring rather than dragging down the Other subject percentile.
 

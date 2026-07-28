@@ -17,6 +17,7 @@ from typing import Final, TypedDict
 
 from jeopardy_consts import (
     ANKI_COLLECTION_PATH,
+    DECK_ARCHIVE_NAME,
     EASE_BASE,
     EASE_MAX,
     EASE_MIN,
@@ -31,12 +32,13 @@ from jeopardy_consts import (
     PRIOR_WEIGHT,
     TOTAL_FIELDS,
     WEAKNESS_EASE_PENALTY,
+    WEAKNESS_PRIORITY_BOOST,
 )
 from jeopardy_db_helpers import connect_anki
 
 logger = logging.getLogger(__name__)
 
-_FREQ_SCORE_RE = re.compile(r">freq (\d+) ·")
+_FREQ_SCORE_RE = re.compile(r'class="fq [hmlr]">(\d+)<')
 _TIER_SCORE_FALLBACK: Final[dict[str, int]] = {
     "high": 75,
     "medium": 55,
@@ -69,6 +71,7 @@ class CardRecord(TypedDict):
     reviews: int
     correct: int
     raw_tags: str
+    archived: bool
 
 
 class CategoryStats(TypedDict):
@@ -92,6 +95,23 @@ def _parse_tags(tags: str) -> tuple[str, str, str]:
     return freq_tier, subcat, subject
 
 
+def _informative_perf_tags(card_perf: str, subcat_perf: str) -> list[str]:
+    """Return only the perf tags that carry information worth storing.
+
+    These tags land on every one of ~452K notes, so the default states are not
+    written: `perf:new` covers 99.8% of the deck and `perfsubcat:strong` marks
+    the areas you have no reason to search for. Persisting both cost roughly
+    20MB and helped push the collection past AnkiWeb's 300MB upload ceiling.
+    Their absence is exactly as meaningful as their presence.
+    """
+    tags: list[str] = []
+    if card_perf != "new":
+        tags.append(f"perf:{card_perf}")
+    if subcat_perf != "strong":
+        tags.append(f"perfsubcat:{subcat_perf}")
+    return tags
+
+
 def _strip_perf_tags(tags: str) -> list[str]:
     """Return tag list with all perf:*, perfsubcat:*, perfsubject:* removed."""
     return [t for t in tags.split() if not any(t.startswith(p) for p in _PERF_PREFIXES)]
@@ -102,18 +122,31 @@ def load_card_stats(conn: sqlite3.Connection) -> dict[int, CardRecord]:
     cursor = conn.cursor()
     cursor.execute(
         """
-        SELECT n.id, c.id, n.tags, c.type, c.due, c.factor, n.flds
+        SELECT n.id, c.id, n.tags, c.type, c.due, c.factor, n.flds,
+               COALESCE(d.name, '')
         FROM notes n
         JOIN cards c ON c.nid = n.id
+        LEFT JOIN decks d ON d.id = c.did
         WHERE n.mid = ?
         """,
         (JEOPARDY_NOTETYPE_ID,),
     )
     cards: dict[int, CardRecord] = {}
-    for note_id, card_id, tags, card_type, due, factor, flds in cursor.fetchall():
+    for (
+        note_id,
+        card_id,
+        tags,
+        card_type,
+        due,
+        factor,
+        flds,
+        deck_name,
+    ) in cursor.fetchall():
         freq_tier, subcat, subject = _parse_tags(tags)
         parts = flds.split("\x1f")
-        show_number = parts[FIELD_SHOW_NUMBER].strip() if len(parts) > FIELD_SHOW_NUMBER else ""
+        show_number = (
+            parts[FIELD_SHOW_NUMBER].strip() if len(parts) > FIELD_SHOW_NUMBER else ""
+        )
         category = parts[FIELD_CATEGORY].strip() if len(parts) > FIELD_CATEGORY else ""
         freq_score = _TIER_SCORE_FALLBACK.get(freq_tier, 30)
         if len(parts) > TOTAL_FIELDS:
@@ -135,6 +168,7 @@ def load_card_stats(conn: sqlite3.Connection) -> dict[int, CardRecord]:
             "reviews": 0,
             "correct": 0,
             "raw_tags": tags,
+            "archived": deck_name == DECK_ARCHIVE_NAME,
         }
     logger.info("Loaded %d Jeopardy cards", len(cards))
     return cards
@@ -227,6 +261,17 @@ def accuracy_to_tier(accuracy: float) -> str:
     if accuracy >= PERF_WEAK_THRESHOLD:
         return "medium"
     return "weak"
+
+
+def study_priority(freq_score: int, subcat_accuracy: float) -> float:
+    """Rank a card for the new-card queue: game frequency, tilted toward weak areas.
+
+    The frequency score stays a pure "how likely is this to be asked" measure, so
+    the personal-performance adjustment is applied here at ordering time instead.
+    A subcategory answered at 60% is surfaced ahead of an equally frequent one
+    answered at 95%.
+    """
+    return freq_score * (1.0 + WEAKNESS_PRIORITY_BOOST * (1.0 - subcat_accuracy))
 
 
 def compute_ease(freq_tier: str, weakness_tier: str) -> int:
@@ -409,13 +454,12 @@ def main() -> None:
     tag_updates_by_note: dict[int, str] = {}
     ease_deltas: list[int] = []
     perf_counts: dict[str, int] = defaultdict(int)
-    cat_groups: dict[tuple[str, str], list[tuple[int, int]]] = defaultdict(list)
+    cat_groups: dict[tuple[str, str], list[tuple[float, int]]] = defaultdict(list)
 
     for rec in cards.values():
         note_id = rec["note_id"]
         card_id = rec["card_id"]
         sc = rec["subcat"] or "Unknown"
-        subj = rec["subject"] or "Unknown"
 
         if rec["reviews"] >= MIN_REVIEWS_FOR_CARD_PERF:
             card_acc = rec["correct"] / rec["reviews"]
@@ -425,9 +469,7 @@ def main() -> None:
         perf_counts[card_perf] += 1
 
         subcat_acc = subcat_stats[sc]["blended_accuracy"]
-        subject_acc = subject_stats[subj]["blended_accuracy"]
         subcat_perf = accuracy_to_tier(subcat_acc)
-        subject_perf = accuracy_to_tier(subject_acc)
 
         new_ease = compute_ease(rec["freq_tier"], subcat_perf)
         ease_updates.append((new_ease, card_id))
@@ -435,16 +477,19 @@ def main() -> None:
 
         if note_id not in tag_updates_by_note:
             base = _strip_perf_tags(rec["raw_tags"])
-            new_tags = base + [
-                f"perf:{card_perf}",
-                f"perfsubcat:{subcat_perf}",
-                f"perfsubject:{subject_perf}",
-            ]
-            tag_updates_by_note[note_id] = " " + " ".join(new_tags) + " "
+            perf_tags = _informative_perf_tags(card_perf, subcat_perf)
+            had_perf_tags = base != rec["raw_tags"].split()
+            if perf_tags or had_perf_tags:
+                merged = base + perf_tags
+                tag_updates_by_note[note_id] = (
+                    " " + " ".join(merged) + " " if merged else ""
+                )
 
-        if rec["card_type"] == 0:
+        if rec["card_type"] == 0 and not rec["archived"]:
             group_key = (rec["show_number"], rec["category"])
-            cat_groups[group_key].append((rec["freq_score"], card_id))
+            cat_groups[group_key].append(
+                (study_priority(rec["freq_score"], subcat_acc), card_id)
+            )
 
     # Sort category groups by total freq score (highest first), then assign due positions.
     sorted_groups = sorted(
@@ -455,7 +500,7 @@ def main() -> None:
     due_updates: list[tuple[int, int]] = []
     pos = 1
     for _key, card_entries in sorted_groups:
-        for _score, card_id in sorted(card_entries, key=lambda e: e[1]):
+        for _score, card_id in sorted(card_entries, key=lambda e: (-e[0], e[1])):
             due_updates.append((pos, card_id))
             pos += 1
     tag_updates: list[tuple[str, int]] = [

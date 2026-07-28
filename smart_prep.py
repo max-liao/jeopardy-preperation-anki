@@ -35,9 +35,15 @@ from pathlib import Path
 from typing import Literal
 
 from jeopardy_consts import (
+    BADGE_STYLE_BLOCK,
+    BADGE_STYLE_MARKER,
+    CARD_AGE_DEFAULT,
+    CARD_AGE_WEIGHTS,
     ERA_MODERN_START,
     ERA_RECENT_START,
     FIELD_AIR_DATE,
+    LIVENESS_DEFAULT,
+    LIVENESS_WEIGHTS,
     FIELD_ANSWER,
     FIELD_CATEGORY,
     FIELD_DAILY_DOUBLE,
@@ -59,21 +65,25 @@ from jeopardy_consts import (
     STAKE_J_VALUE_MAX,
     STAKE_J_VALUE_MIN,
     SUBJECT_OTHER,
-    TIER_BADGE_COLORS,
+    TIER_BADGE_CLASS,
     TIER_HIGH_MIN,
     TIER_LOW_MIN,
     TIER_MEDIUM_MIN,
     TOTAL_FIELDS,
+    USN_PENDING,
     WEIGHT_ANSWER,
     WEIGHT_SUBCATEGORY,
     WEIGHT_SUBJECT,
 )
 from jeopardy_db_helpers import (
     connect_anki,
+    merge_plural_variants,
+    normalize_answer,
     extract_colpkg,
     pack_apkg,
     protobuf_prepend_to_field1,
     rename_deck,
+    require_anki_closed,
     strip_foreign_decks,
 )
 
@@ -104,6 +114,51 @@ def get_year_from_date(air_date: str) -> int:
 def recency_weight(year: int) -> float:
     """Recency weight for a year (0.0 if outside the known range)."""
     return RECENCY_WEIGHTS.get(year, 0.0)
+
+
+def liveness_weight(last_seen_year: int) -> float:
+    """How alive a topic still is, from the last year its answer appeared.
+
+    Answers whose most recent appearance is decades old are effectively retired,
+    however often they came up at the time. This is the primary "no longer
+    relevant" discriminator.
+    """
+    return LIVENESS_WEIGHTS.get(last_seen_year, LIVENESS_DEFAULT)
+
+
+def card_age_weight(year: int) -> float:
+    """Mild decay on a card's own air year (phrasing drifts over time)."""
+    return CARD_AGE_WEIGHTS.get(year, CARD_AGE_DEFAULT)
+
+
+def build_answer_last_seen(meta: dict[int, NoteMeta]) -> dict[str, int]:
+    """Map each answer TOPIC to the most recent year it appeared in the corpus.
+
+    Keys are normalized and plural-folded, so "talons" and "talon" count as one
+    topic. Matching on the raw text instead would make a live topic look retired
+    purely because its most recent airing used a different spelling.
+
+    Args:
+        meta: note_id -> NoteMeta
+
+    Returns:
+        normalized answer key -> latest air year
+    """
+    years_by_key: dict[str, list[int]] = defaultdict(list)
+    for answer_key, _ck, _s, _lbl, _sec, year, _stake in meta.values():
+        if answer_key:
+            years_by_key[answer_key].append(year)
+    return {k: max(v) for k, v in merge_plural_variants(dict(years_by_key)).items()}
+
+
+def topic_liveness_for(answer_key: str, answer_last_seen: dict[str, int]) -> float:
+    """Liveness for an answer, checking its plural-folded form as a fallback."""
+    if not answer_key:
+        return LIVENESS_DEFAULT
+    last = answer_last_seen.get(answer_key)
+    if last is None and answer_key.endswith("s"):
+        last = answer_last_seen.get(answer_key[:-1])
+    return liveness_weight(last) if last is not None else LIVENESS_DEFAULT
 
 
 def get_era_tag(year: int) -> str:
@@ -218,7 +273,7 @@ def read_note_meta(
         subject, subcat_label, secondary_subject = taxonomy.get(
             category, (SUBJECT_OTHER, _DEFAULT_SUBCAT, "")
         )
-        answer_key = answer.casefold()
+        answer_key = normalize_answer(answer)
         subcat_key = subcat_label.casefold()
         stake_mult = compute_stake_multiplier(
             parts[FIELD_ROUND], parts[FIELD_VALUE], parts[FIELD_DAILY_DOUBLE]
@@ -300,11 +355,23 @@ def score_notes(
     subcat_score: dict[str, float],
     subject_score: dict[str, float],
     secondary_subject_score: dict[str, float],
+    answer_last_seen: dict[str, int],
 ) -> dict[int, tuple[int, Tier]]:
     """Compute the blended 0-100 score and tier for every note.
 
-    Each component is converted to a percentile across all notes, then blended
-    with the configured weights and scaled to 0-100.
+    Three stages:
+
+    1. TOPIC BLEND — percentile of the note's answer, sub-category, and subject
+       frequencies, combined with the configured weights. "How much does this
+       material come up at all?"
+    2. RELEVANCE DECAY — the blend is multiplied by `liveness_weight` (has this
+       answer appeared recently, or did it retire in 1994?) and `card_age_weight`
+       (a gentler nudge on the card's own air year). A frequently-asked topic
+       that stopped appearing decades ago is demoted; an old card about a topic
+       still in rotation keeps most of its value.
+    3. RE-PERCENTILE — the decayed values are ranked again so the final 0-100 is
+       a true percentile. A score of 85 means "more study-worthy than 85% of the
+       deck", which keeps the tier thresholds meaningful.
 
     For the subject component, uses max(primary_subject, secondary_subject) so that
     a wordplay category embedding a knowledge domain (e.g. "SCIENCE BEFORE & AFTER")
@@ -316,6 +383,7 @@ def score_notes(
         subcat_score: subcat_key -> recency-weighted frequency
         subject_score: subject -> recency-weighted frequency
         secondary_subject_score: secondary_subject -> recency-weighted frequency
+        answer_last_seen: answer_key -> most recent year that answer appeared
 
     Returns:
         note_id -> (score 0-100, tier)
@@ -357,26 +425,46 @@ def score_notes(
     pct_c = make_percentile_fn(list(cv.values()))
     pct_s = make_percentile_fn(list(sv.values()))
 
-    scored: dict[int, tuple[int, Tier]] = {}
-    for nid in meta:
-        blended = 100.0 * (
+    # Stages 1-2: topic blend, then decay by topic liveness and card age.
+    decayed: dict[int, float] = {}
+    for nid, m in meta.items():
+        answer_key, _ck, _subj, _lbl, _sec, year, _stake = m
+        blended = (
             WEIGHT_ANSWER * pct_a(av[nid])
             + WEIGHT_SUBCATEGORY * pct_c(cv[nid])
             + WEIGHT_SUBJECT * pct_s(sv[nid])
         )
-        score = int(round(blended))
-        scored[nid] = (score, tier_from_score(blended))
+        liveness = topic_liveness_for(answer_key, answer_last_seen)
+        decayed[nid] = blended * liveness * card_age_weight(year)
+
+    # Stage 3: re-rank so the published score is a true percentile.
+    pct_final = make_percentile_fn(list(decayed.values()))
+    scored: dict[int, tuple[int, Tier]] = {}
+    for nid in meta:
+        final = 100.0 * pct_final(decayed[nid])
+        scored[nid] = (int(round(final)), tier_from_score(final))
     return scored
 
 
 def badge_html(score: int, tier: Tier, subject: str) -> str:
-    """Render the on-card frequency badge as inline-styled HTML."""
-    color = TIER_BADGE_COLORS.get(tier, "#566573")
-    return (
-        '<div style="display:inline-block;margin:4px 0;padding:2px 10px;'
-        f"border-radius:12px;background:{color};color:#fff;font-size:12px;"
-        f'font-weight:bold;">freq {score} · {tier} · {subject}</div>'
-    )
+    """Render the on-card frequency badge.
+
+    Kept deliberately tiny: this string is stored on every one of ~452K notes,
+    so the styling lives in the card template (see BADGE_STYLE_BLOCK) and only
+    the score plus a one-character tier class is persisted. The tier is conveyed
+    by the badge colour, and the subject is already available as a `subject:`
+    tag, so neither is duplicated here.
+
+    Args:
+        score: 0-100 frequency score
+        tier: Frequency tier, which selects the colour class
+        subject: Retained for signature compatibility; not stored on the note
+
+    Returns:
+        Compact HTML for the note's Frequency Score field
+    """
+    del subject  # available via the subject: tag; not worth ~9MB to duplicate
+    return f'<b class="fq {TIER_BADGE_CLASS.get(tier, "r")}">{score}</b>'
 
 
 def get_jeopardy_field_count(conn: sqlite3.Connection) -> int:
@@ -386,6 +474,43 @@ def get_jeopardy_field_count(conn: sqlite3.Connection) -> int:
         "SELECT COUNT(*) FROM fields WHERE ntid = ?", (JEOPARDY_NOTETYPE_ID,)
     )
     return int(cursor.fetchone()[0])
+
+
+def ensure_badge_styles(conn: sqlite3.Connection) -> bool:
+    """Put the badge stylesheet in the card template, once.
+
+    The per-note badge carries only a tier class, so the rules that colour it
+    have to live somewhere shared. Injecting them into the template keeps ~150
+    bytes off every note. Idempotent via BADGE_STYLE_MARKER.
+
+    Args:
+        conn: SQLite connection
+
+    Returns:
+        True if the stylesheet was injected, False if it was already present
+    """
+    cursor = conn.cursor()
+    injected = False
+    for tmpl_ord, tconfig in cursor.execute(
+        "SELECT ord, config FROM templates WHERE ntid = ?", (JEOPARDY_NOTETYPE_ID,)
+    ).fetchall():
+        if BADGE_STYLE_MARKER.encode() in tconfig:
+            continue
+        cursor.execute(
+            "UPDATE templates SET config = ?, mtime_secs = ?, usn = ? "
+            "WHERE ntid = ? AND ord = ?",
+            (
+                protobuf_prepend_to_field1(tconfig, BADGE_STYLE_BLOCK),
+                int(time.time()),
+                USN_PENDING,
+                JEOPARDY_NOTETYPE_ID,
+                tmpl_ord,
+            ),
+        )
+        injected = True
+    if injected:
+        logger.info("Injected badge stylesheet into card template")
+    return injected
 
 
 def add_frequency_field_and_template(conn: sqlite3.Connection) -> bool:
@@ -547,12 +672,53 @@ def print_report(
     print()
 
 
+def compute_scores(
+    conn: sqlite3.Connection, taxonomy_path: Path
+) -> tuple[
+    dict[int, NoteMeta], dict[int, tuple[int, Tier]], dict[str, float], dict[str, float]
+]:
+    """Read notes from `conn` and score every one of them.
+
+    Args:
+        conn: SQLite connection to a collection holding the Jeopardy notes
+        taxonomy_path: Path to category_taxonomy.json
+
+    Returns:
+        (meta, scored, subject_score, secondary_subject_score)
+    """
+    taxonomy = load_taxonomy(taxonomy_path)
+    logger.info(f"Loaded taxonomy with {len(taxonomy)} categories")
+
+    meta = read_note_meta(conn, taxonomy)
+    answer_score, subcat_score, subject_score, secondary_subject_score = (
+        build_frequency_tables(meta)
+    )
+    answer_last_seen = build_answer_last_seen(meta)
+    logger.info(
+        f"Tables: {len(answer_score)} answers, {len(subcat_score)} sub-categories, "
+        f"{len(subject_score)} subjects, {len(secondary_subject_score)} secondary subjects"
+    )
+    scored = score_notes(
+        meta,
+        answer_score,
+        subcat_score,
+        subject_score,
+        secondary_subject_score,
+        answer_last_seen,
+    )
+    return meta, scored, subject_score, secondary_subject_score
+
+
 def main() -> None:
     """Main entry point."""
     parser = argparse.ArgumentParser(
         description="Blended frequency scoring + tagging for the Jeopardy deck"
     )
-    parser.add_argument("source", help="Source .colpkg (1984–2025, post-merge)")
+    parser.add_argument(
+        "source",
+        nargs="?",
+        help="Source .colpkg. Omit when --live-db is set (the live collection is read directly).",
+    )
     parser.add_argument(
         "output",
         nargs="?",
@@ -586,25 +752,53 @@ def main() -> None:
 
     if not args.analysis_only and not args.output and not args.live_db:
         parser.error("output is required unless --live-db or --analysis-only is set")
+    if not args.source and not args.live_db:
+        parser.error("source is required unless --live-db is set")
 
-    source_path = Path(args.source)
     taxonomy_path = Path(args.taxonomy)
-    if not source_path.exists():
-        logger.error(f"Source not found: {source_path}")
-        sys.exit(1)
 
-    live_db_path: Path | None = None
+    # Refresh mode: read AND write the live collection, so manual note edits are
+    # what gets scored. No .colpkg is involved, which also removes any chance of
+    # the source drifting out of sync with the collection.
     if args.live_db:
         live_db_path = Path(args.live_db).expanduser().resolve()
         if not live_db_path.exists():
             logger.error(f"Live DB not found: {live_db_path}")
             sys.exit(1)
-        wal_path = live_db_path.with_name(live_db_path.name + "-wal")
-        if wal_path.exists() and wal_path.stat().st_size > 0:
-            logger.error(
-                f"Anki appears to be running (WAL file present: {wal_path}). Close Anki first."
-            )
+        require_anki_closed(live_db_path)
+
+        if not args.analysis_only:
+            backup_path = live_db_path.with_name(live_db_path.name + ".bak")
+            shutil.copy2(live_db_path, backup_path)
+            logger.info(f"Backed up live DB to {backup_path}")
+
+        live_conn = connect_anki(live_db_path)
+        meta, scored, subject_score, secondary_subject_score = compute_scores(
+            live_conn, taxonomy_path
+        )
+        print_report(meta, scored, subject_score, secondary_subject_score)
+
+        if args.analysis_only:
+            logger.info("Analysis-only mode; exiting")
+            live_conn.close()
+            return
+
+        if get_jeopardy_field_count(live_conn) < TOTAL_FIELDS:
+            logger.error("Unexpected field count in live DB; aborting")
+            live_conn.close()
             sys.exit(1)
+        ensure_badge_styles(live_conn)
+        appended = add_frequency_field_and_template(live_conn)
+        apply_scores_and_tags(live_conn, meta, scored, appended)
+        live_conn.commit()
+        live_conn.close()
+        logger.info("✓ Scores + tags written to live collection (no import needed)")
+        return
+
+    source_path = Path(args.source)
+    if not source_path.exists():
+        logger.error(f"Source not found: {source_path}")
+        sys.exit(1)
 
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -612,46 +806,14 @@ def main() -> None:
             logger.info(f"Extracting {source_path}")
             db_path = extract_colpkg(source_path, tmp_path)
             conn = connect_anki(db_path)
-
-            taxonomy = load_taxonomy(taxonomy_path)
-            logger.info(f"Loaded taxonomy with {len(taxonomy)} categories")
-
-            meta = read_note_meta(conn, taxonomy)
-            answer_score, subcat_score, subject_score, secondary_subject_score = (
-                build_frequency_tables(meta)
-            )
-            logger.info(
-                f"Tables: {len(answer_score)} answers, {len(subcat_score)} "
-                f"sub-categories, {len(subject_score)} subjects, "
-                f"{len(secondary_subject_score)} secondary subjects"
-            )
-            scored = score_notes(
-                meta, answer_score, subcat_score, subject_score, secondary_subject_score
+            meta, scored, subject_score, secondary_subject_score = compute_scores(
+                conn, taxonomy_path
             )
             print_report(meta, scored, subject_score, secondary_subject_score)
             conn.close()
 
             if args.analysis_only:
                 logger.info("Analysis-only mode; exiting")
-                return
-
-            if live_db_path is not None:
-                # Refresh mode: write badge + tags directly to the live collection.
-                # Only fields 0–13 (user-editable content) are never touched.
-                backup_path = live_db_path.with_name(live_db_path.name + ".bak")
-                shutil.copy2(live_db_path, backup_path)
-                logger.info(f"Backed up live DB to {backup_path}")
-
-                live_conn = connect_anki(live_db_path)
-                if get_jeopardy_field_count(live_conn) < TOTAL_FIELDS:
-                    logger.error("Unexpected field count in live DB; aborting")
-                    live_conn.close()
-                    sys.exit(1)
-                appended = add_frequency_field_and_template(live_conn)
-                apply_scores_and_tags(live_conn, meta, scored, appended)
-                live_conn.commit()
-                live_conn.close()
-                logger.info("✓ Scores + tags written to live collection (no import needed)")
                 return
 
             # Initial setup mode: build a fresh .apkg for first-time import.
@@ -662,6 +824,7 @@ def main() -> None:
                 conn.close()
                 sys.exit(1)
 
+            ensure_badge_styles(conn)
             appended = add_frequency_field_and_template(conn)
             apply_scores_and_tags(conn, meta, scored, appended)
 

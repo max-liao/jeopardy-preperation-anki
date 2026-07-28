@@ -23,6 +23,16 @@ TOTAL_FIELDS: Final[int] = 14
 # Anki notetype IDs (from the existing collection)
 JEOPARDY_NOTETYPE_ID: Final[int] = 1560061137470
 
+# Deck names. The legacy deck holds the original 1984-2019 import; everything is
+# consolidated into the Smart Prep deck, with dead cards parked in its subdeck.
+DECK_LEGACY_NAME: Final[str] = "Jeopardy"
+DECK_TARGET_NAME: Final[str] = "Jeopardy Smart Prep"
+DECK_ARCHIVE_NAME: Final[str] = "Jeopardy Smart Prep::Archive"
+
+# Anki sentinel values.
+USN_PENDING: Final[int] = -1  # "modified locally, not yet synced"
+GRAVE_TYPE_DECK: Final[int] = 2  # graves.type for a deleted deck
+
 # Blended-score tier thresholds (on the 0-100 blended percentile score).
 TIER_HIGH_MIN: Final[float] = 70.0
 TIER_MEDIUM_MIN: Final[float] = 40.0
@@ -49,6 +59,29 @@ TIER_BADGE_COLORS: Final[dict[str, str]] = {
     "rare": "#566573",
 }
 
+# One-character CSS class per tier. The badge is stored on all ~452K notes, so
+# every byte here costs ~450KB of collection size; the styling itself lives once
+# in the card template (BADGE_STYLE_BLOCK) rather than inline on each note.
+# Inline styling previously cost 174 bytes/note = 79MB, which pushed the
+# collection past AnkiWeb's 300MB upload ceiling.
+TIER_BADGE_CLASS: Final[dict[str, str]] = {
+    "high": "h",
+    "medium": "m",
+    "low": "l",
+    "rare": "r",
+}
+BADGE_STYLE_MARKER: Final[str] = "fq-badge-css"
+BADGE_STYLE_BLOCK: Final[str] = (
+    f"<style>/*{BADGE_STYLE_MARKER}*/"
+    ".fq{display:inline-block;margin:4px 0;padding:2px 10px;border-radius:12px;"
+    "color:#fff;font-size:12px;font-weight:bold}"
+    f".fq.h{{background:{TIER_BADGE_COLORS['high']}}}"
+    f".fq.m{{background:{TIER_BADGE_COLORS['medium']}}}"
+    f".fq.l{{background:{TIER_BADGE_COLORS['low']}}}"
+    f".fq.r{{background:{TIER_BADGE_COLORS['rare']}}}"
+    "</style>\n"
+)
+
 # Recency weights by year (1984-2026)
 # Updated to reflect actual data: 1984-2019 in current collection,
 # 2020-2025 in supplemental dataset
@@ -65,6 +98,49 @@ RECENCY_WEIGHTS: Final[dict[int, float]] = {
 # Era tag boundaries
 ERA_RECENT_START: Final[int] = 2020
 ERA_MODERN_START: Final[int] = 2010
+
+# --- Topic liveness -------------------------------------------------------
+# Keyed by the most recent year an ANSWER appeared anywhere in the corpus.
+# This is the sharpest "still relevant?" signal: an answer that stopped showing
+# up in 1994 is dead no matter how often it appeared back then, whereas one last
+# seen in 2024 is live regardless of how old the individual card is.
+LIVENESS_WEIGHTS: Final[dict[int, float]] = {
+    **{y: 1.00 for y in range(2020, 2027)},
+    **{y: 0.85 for y in range(2015, 2020)},
+    **{y: 0.65 for y in range(2010, 2015)},
+    **{y: 0.45 for y in range(2005, 2010)},
+    **{y: 0.30 for y in range(2000, 2005)},
+    **{y: 0.15 for y in range(1984, 2000)},
+}
+LIVENESS_DEFAULT: Final[float] = 0.15
+
+# --- Card age decay -------------------------------------------------------
+# Keyed by the card's OWN air year. Deliberately gentler than liveness: an old
+# clue about a still-live topic is only slightly less useful (phrasing drifts),
+# so this nudges rather than dominates.
+CARD_AGE_WEIGHTS: Final[dict[int, float]] = {
+    **{y: 1.00 for y in range(2020, 2027)},
+    **{y: 0.95 for y in range(2015, 2020)},
+    **{y: 0.90 for y in range(2010, 2015)},
+    **{y: 0.80 for y in range(2000, 2010)},
+    **{y: 0.70 for y in range(1984, 2000)},
+}
+CARD_AGE_DEFAULT: Final[float] = 0.70
+
+# --- Archive (dead-card) thresholds --------------------------------------
+# Cards matching these are moved to the Archive subdeck, never deleted. Cards
+# you have already reviewed, and anything aired from ARCHIVE_PROTECT_YEAR on,
+# are always exempt.
+ARCHIVE_PROTECT_YEAR: Final[int] = 2020
+ARCHIVE_STALE_BEFORE_YEAR: Final[int] = 2015  # time-anchored wording
+ARCHIVE_ONEOFF_BEFORE_YEAR: Final[int] = 2010  # answer never repeated
+ARCHIVE_DEAD_TOPIC_BEFORE_YEAR: Final[int] = 2005  # answer not seen since
+DUPLICATE_JACCARD_THRESHOLD: Final[float] = 0.65
+DUPLICATE_BLOCK_MAX_POSTINGS: Final[int] = 60  # skip common tokens when blocking
+
+# Personal-weakness boost applied when ORDERING cards for study (not to the
+# frequency score itself, which stays a pure game-likelihood measure).
+WEAKNESS_PRIORITY_BOOST: Final[float] = 0.35
 
 # TSV field names (from jwolle1 dataset)
 # IMPORTANT: jwolle1 uses Jeopardy's native terminology, which is REVERSED from
@@ -134,7 +210,12 @@ EASE_BASE: Final[int] = 2500
 EASE_MIN: Final[int] = 1300
 EASE_MAX: Final[int] = 4000
 # Penalty subtracted from EASE_BASE per freq tier (negative = bonus for rare cards)
-FREQ_EASE_PENALTY: Final[dict[str, int]] = {"high": 600, "medium": 300, "low": 0, "rare": -200}
+FREQ_EASE_PENALTY: Final[dict[str, int]] = {
+    "high": 600,
+    "medium": 300,
+    "low": 0,
+    "rare": -200,
+}
 # Penalty subtracted from EASE_BASE per weakness tier
 WEAKNESS_EASE_PENALTY: Final[dict[str, int]] = {"weak": 600, "medium": 300, "strong": 0}
 PERF_WEAK_THRESHOLD: Final[float] = 0.60

@@ -25,9 +25,6 @@ from pathlib import Path
 from typing import Final
 
 from jeopardy_consts import SUBJECT_OTHER
-from typing import Final
-
-from jeopardy_consts import SUBJECT_OTHER
 
 # ---------------------------------------------------------------------------
 # Manual overrides — hand-coded mappings for high-frequency on-air categories.
@@ -267,7 +264,6 @@ MANUAL_OVERRIDES: Final[dict[str, tuple[str, str]]] = {
     "THE LAW":                    ("Politics & Government", "Law"),
     "THE SUPREME COURT":          ("Politics & Government", "Law"),
     "ORGANIZATIONS":              ("Business & Economics", "Organizations"),
-    "NATIONAL PARKS":             ("Geography", "US Geography"),
     # ── Business & Economics ─────────────────────────────────────────────────
     "ECONOMICS":                  ("Business & Economics", "Economics"),
     "MONEY":                      ("Business & Economics", "Finance"),
@@ -331,7 +327,6 @@ MANUAL_OVERRIDES: Final[dict[str, tuple[str, str]]] = {
     "MORE THAN ONE MEANING":      ("Wordplay & Language", "Vocabulary"),
     "IN OTHER WORDS...":          ("Wordplay & Language", "Vocabulary"),
     "NEW TO THE OED":             ("Wordplay & Language", "Vocabulary"),
-    "LITERARY TERMS":             ("Literature", "Literary Terms"),
     "RHYME TIME":                 ("Wordplay & Language", "Wordplay"),
     "HOMOPHONES":                 ("Wordplay & Language", "Wordplay"),
     "HOMOPHONIC PAIRS":           ("Wordplay & Language", "Wordplay"),
@@ -356,7 +351,6 @@ MANUAL_OVERRIDES: Final[dict[str, tuple[str, str]]] = {
     "COMMON BONDS":               ("Wordplay & Language", "Word Patterns"),
     "LAST NAME'S THE SAME":       ("Wordplay & Language", "Wordplay"),
     "FIRST NAME'S THE SAME":      ("Wordplay & Language", "Wordplay"),
-    "FAMOUS PAIRS":               ("People", "Biography"),
     # ── Other / Unclassified ─────────────────────────────────────────────────
     "POTPOURRI":                  ("Other", "Unclassified"),
     "HODGEPODGE":                 ("Other", "Unclassified"),
@@ -366,7 +360,6 @@ MANUAL_OVERRIDES: Final[dict[str, tuple[str, str]]] = {
     "FACTS & FIGURES":            ("Other", "Unclassified"),
     "POT LUCK":                   ("Other", "Unclassified"),
     "MISCELLANEOUS":              ("Other", "Unclassified"),
-    "WORLD FACTS":                ("Geography", "Geography"),
 }
 
 # ---------------------------------------------------------------------------
@@ -531,6 +524,20 @@ def _lookup_synonym(label: str) -> str:
     return _SYNONYM_LOWER.get(label.strip().lower(), label.strip())
 
 
+def _clean_secondary_subject(raw_secondary: str, subj: str) -> str:
+    """Guard secondary_subject: never equal to the primary subject or 'Other'.
+
+    Mirrors the same guard classify_categories.py applies when it first parses
+    the LLM's output, so re-running consolidation stays idempotent even if a
+    manual override changes the primary subject out from under a cached
+    secondary_subject.
+    """
+    secondary = (raw_secondary or "").strip()
+    if not secondary or secondary == subj or secondary == SUBJECT_OTHER:
+        return ""
+    return secondary
+
+
 def consolidate(
     taxonomy: dict[str, dict[str, str]],
     *,
@@ -542,20 +549,27 @@ def consolidate(
     Return (consolidated_taxonomy, merge_log).
 
     merge_log maps original subcat label → canonical label for every rename.
-    The taxonomy dict maps CATEGORY_UPPER → {subject, sub_category}.
+    The taxonomy dict maps CATEGORY_UPPER → {subject, sub_category, secondary_subject}.
     """
     merge_log: dict[str, str] = {}
     result: dict[str, dict[str, str]] = {}
 
     for category, info in taxonomy.items():
+        raw_secondary = info.get("secondary_subject", "")
+
         # 0. Manual override wins unconditionally over LLM output
         if category in MANUAL_OVERRIDES:
             subj, subcat = MANUAL_OVERRIDES[category]
-            result[category] = {"subject": subj, "sub_category": subcat}
+            result[category] = {
+                "subject": subj,
+                "sub_category": subcat,
+                "secondary_subject": _clean_secondary_subject(raw_secondary, subj),
+            }
             continue
 
         subj = info.get("subject", SUBJECT_OTHER)
         raw_subcat = info.get("sub_category", "Unclassified") or "Unclassified"
+        secondary_subject = _clean_secondary_subject(raw_secondary, subj)
 
         subcat = raw_subcat
 
@@ -564,7 +578,11 @@ def consolidate(
             canonical = "Unclassified"
             if raw_subcat != canonical:
                 merge_log[raw_subcat] = canonical
-            result[category] = {"subject": subj, "sub_category": canonical}
+            result[category] = {
+                "subject": subj,
+                "sub_category": canonical,
+                "secondary_subject": secondary_subject,
+            }
             continue
 
         # 2. Apply synonym map
@@ -591,7 +609,11 @@ def consolidate(
                 merge_log[subcat] = matched
                 subcat = matched
 
-        result[category] = {"subject": subj, "sub_category": subcat.strip()}
+        result[category] = {
+            "subject": subj,
+            "sub_category": subcat.strip(),
+            "secondary_subject": secondary_subject,
+        }
 
     return result, merge_log
 
@@ -684,7 +706,10 @@ def main() -> None:
         "--output",
         type=Path,
         default=None,
-        help="Output path (default: overwrite input)",
+        help=(
+            "Output path (default: <input>.consolidated.json — never overwrites "
+            "the input; pass --output matching --input to replace it explicitly)"
+        ),
     )
     parser.add_argument(
         "--dry-run",
@@ -724,7 +749,11 @@ def main() -> None:
     injected = 0
     for cat, (subj, sc) in MANUAL_OVERRIDES.items():
         if cat not in taxonomy:
-            taxonomy[cat] = {"subject": subj, "sub_category": sc}
+            taxonomy[cat] = {
+                "subject": subj,
+                "sub_category": sc,
+                "secondary_subject": "",
+            }
             injected += 1
     if injected:
         print(f"  Injected {injected} manual overrides for uncategorized entries.")
@@ -742,9 +771,19 @@ def main() -> None:
         print("Dry-run mode — no files written.")
         return
 
-    output_path: Path = args.output if args.output else input_path
-    with output_path.open("w") as f:
+    # Default to a NEW file rather than overwriting --input: an earlier version
+    # of this script silently destroyed the classifier's secondary_subject data
+    # by overwriting category_taxonomy.json in place. Callers that really want
+    # to replace the input can still pass --output pointing at it explicitly.
+    default_output = input_path.with_name(
+        f"{input_path.stem}.consolidated{input_path.suffix}"
+    )
+    output_path: Path = args.output if args.output else default_output
+
+    tmp_path = output_path.with_suffix(output_path.suffix + ".tmp")
+    with tmp_path.open("w", encoding="utf-8") as f:
         json.dump(consolidated, f, indent=2, ensure_ascii=False)
+    tmp_path.replace(output_path)
     print(f"Written to: {output_path}")
 
 

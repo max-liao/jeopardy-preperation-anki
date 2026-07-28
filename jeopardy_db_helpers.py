@@ -119,6 +119,27 @@ def connect_anki(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
+def require_anki_closed(db_path: Path) -> None:
+    """Exit if Anki still holds the collection open.
+
+    Anki keeps a non-empty write-ahead log while running; writing underneath it
+    corrupts the collection. Every script that mutates the live DB calls this
+    first.
+
+    Args:
+        db_path: Path to the live collection.anki2
+
+    Raises:
+        SystemExit: If a non-empty WAL file is present
+    """
+    wal_path = db_path.with_name(db_path.name + "-wal")
+    if wal_path.exists() and wal_path.stat().st_size > 0:
+        logger.error(
+            "Anki appears to be running (WAL present: %s). Close Anki first.", wal_path
+        )
+        raise SystemExit(1)
+
+
 def get_deck_id(conn: sqlite3.Connection, deck_name: str = "Jeopardy") -> int:
     """Get the deck ID for a named deck from the collection.
 
@@ -202,6 +223,70 @@ def strip_html_media(text: str) -> str:
         Text with HTML tags and sound references removed
     """
     return _SOUND_RE.sub("", _HTML_TAG_RE.sub("", text))
+
+
+_PARENTHETICAL_RE = re.compile(r"\s*\([^)]*\)")
+_LEADING_ARTICLE_RE = re.compile(r"^(?:the|a|an)\s+")
+_PUNCT_ONLY_RE = re.compile(r"^[^\w]*$")
+_WHITESPACE_RE = re.compile(r"\s+")
+
+
+def normalize_answer(text: str) -> str:
+    """Reduce an answer to a comparable topic key.
+
+    The same subject is written many ways across 42 seasons — "talons" vs
+    "talon", "porpoise (dolphin)" vs "porpoise", "the Nile" vs "Nile". Treating
+    those as unrelated makes a live topic look retired, so recurrence and
+    liveness are computed on this normalized form.
+
+    Deliberately conservative: it strips parentheticals, a leading article, and
+    surrounding punctuation only. Plural folding is NOT done here because
+    blindly dropping a trailing "s" would corrupt words like "Paris"; see
+    `merge_plural_variants`, which folds them only when both forms genuinely
+    occur.
+
+    Args:
+        text: Raw answer field text
+
+    Returns:
+        Normalized key (empty string if nothing usable remains)
+    """
+    stripped = strip_html_media(text).casefold().strip()
+    stripped = _PARENTHETICAL_RE.sub("", stripped)
+    stripped = _LEADING_ARTICLE_RE.sub("", stripped)
+    stripped = _WHITESPACE_RE.sub(" ", stripped).strip(" \"'.,!?;:")
+    return "" if _PUNCT_ONLY_RE.match(stripped) else stripped
+
+
+def is_malformed_answer(text: str) -> bool:
+    """True when an answer carries no usable content (empty or punctuation only).
+
+    Short answers are explicitly NOT malformed: "9", "H" and "4" are all real
+    Jeopardy responses.
+    """
+    return not normalize_answer(text)
+
+
+def merge_plural_variants(years_by_key: dict[str, list[int]]) -> dict[str, list[int]]:
+    """Fold "<key>s" into "<key>" when BOTH spellings occur in the corpus.
+
+    Requiring both forms to be present is what makes this safe: "talon" and
+    "talons" both appear so they merge, while "paris" never merges into a
+    "pari" that nobody ever answered.
+
+    Args:
+        years_by_key: normalized answer -> air years it appeared in
+
+    Returns:
+        A new mapping with plural forms folded into their singular
+    """
+    merged: dict[str, list[int]] = {k: list(v) for k, v in years_by_key.items()}
+    for key in list(merged):
+        if key.endswith("s") and len(key) > 3:
+            singular = key[:-1]
+            if singular in merged:
+                merged[singular].extend(merged.pop(key))
+    return merged
 
 
 def _read_varint(data: bytes, pos: int) -> tuple[int, int]:
