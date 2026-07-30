@@ -71,16 +71,6 @@ TIER_BADGE_CLASS: Final[dict[str, str]] = {
     "rare": "r",
 }
 BADGE_STYLE_MARKER: Final[str] = "fq-badge-css"
-BADGE_STYLE_BLOCK: Final[str] = (
-    f"<style>/*{BADGE_STYLE_MARKER}*/"
-    ".fq{display:inline-block;margin:4px 0;padding:2px 10px;border-radius:12px;"
-    "color:#fff;font-size:12px;font-weight:bold}"
-    f".fq.h{{background:{TIER_BADGE_COLORS['high']}}}"
-    f".fq.m{{background:{TIER_BADGE_COLORS['medium']}}}"
-    f".fq.l{{background:{TIER_BADGE_COLORS['low']}}}"
-    f".fq.r{{background:{TIER_BADGE_COLORS['rare']}}}"
-    "</style>\n"
-)
 
 # Recency weights by year (1984-2026)
 # Updated to reflect actual data: 1984-2019 in current collection,
@@ -159,11 +149,16 @@ TSV_QUESTION: Final[str] = "question"  # the response -> Anki Answer field
 TSV_AIR_DATE: Final[str] = "air_date"
 TSV_NOTES: Final[str] = "notes"
 
+# Anki round name (field 3) for the Final Jeopardy round. Its one clue/day is
+# handled specially in study_optimizer.py: pulled out of the day's category
+# group and interspersed across the new-card queue instead of being grouped.
+ROUND_FINAL_JEOPARDY: Final[str] = "Final Jeopardy"
+
 # TSV round codes -> Anki round names
 ROUND_CODE_TO_NAME: Final[dict[str, str]] = {
     "1": "Jeopardy",
     "2": "Double Jeopardy",
-    "3": "Final Jeopardy",
+    "3": ROUND_FINAL_JEOPARDY,
 }
 
 # Closed vocabulary of broad SUBJECTS for category classification.
@@ -188,6 +183,37 @@ SUBJECTS: Final[tuple[str, ...]] = (
     "Other",
 )
 SUBJECT_OTHER: Final[str] = "Other"
+
+# Short per-subject class codes, expanded back to full text by CSS in the card
+# template (see BADGE_STYLE_BLOCK). Same trade as TIER_BADGE_CLASS: the code on
+# the note costs ~4 bytes (~1.8MB across the deck) where the literal subject
+# text plus markup would cost ~36 bytes (~16MB). SUBJECT_OTHER is deliberately
+# absent — "Other" is a non-label, so those badges render as the bare score.
+SUBJECT_BADGE_CLASS: Final[dict[str, str]] = {
+    subject: f"s{index}"
+    for index, subject in enumerate(s for s in SUBJECTS if s != SUBJECT_OTHER)
+}
+
+# Separator drawn between the score and the subject inside the badge pill.
+# A literal MIDDLE DOT, not the CSS escape "\00b7": browsers ended that escape
+# at "\00" (which resolves to U+0000 and is substituted with U+FFFD), leaving a
+# stray "b7" in the badge. The template is UTF-8, so the character is safe.
+BADGE_SEPARATOR: Final[str] = " · "
+
+BADGE_STYLE_BLOCK: Final[str] = (
+    f"<style>/*{BADGE_STYLE_MARKER}*/"
+    ".fq{display:inline-block;margin:4px 0;padding:2px 10px;border-radius:12px;"
+    "color:#fff;font-size:12px;font-weight:bold}"
+    f".fq.h{{background:{TIER_BADGE_COLORS['high']}}}"
+    f".fq.m{{background:{TIER_BADGE_COLORS['medium']}}}"
+    f".fq.l{{background:{TIER_BADGE_COLORS['low']}}}"
+    f".fq.r{{background:{TIER_BADGE_COLORS['rare']}}}"
+    + "".join(
+        f'.fq.{code}::after{{content:"{BADGE_SEPARATOR}{subject}"}}'
+        for subject, code in SUBJECT_BADGE_CLASS.items()
+    )
+    + "</style>\n"
+)
 
 # Stake multipliers applied during frequency accumulation (multiplied with recency weight).
 # Priority tiers (highest → lowest):
@@ -225,6 +251,38 @@ PRIOR_ACCURACY: Final[float] = 0.70
 PRIOR_WEIGHT: Final[int] = 5
 MIN_REVIEWS_FOR_CARD_PERF: Final[int] = 3
 ANKI_COLLECTION_PATH: Final[str] = "~/.local/share/Anki2/User 1/collection.anki2"
+
+# --- Deck options (deck_config table) ------------------------------------
+# Field numbers below are for the `config` BLOB column of the `deck_config`
+# table, which holds a serialized `DeckConfig.Config` protobuf message (one
+# row shared by every deck in this collection). Sourced directly from Anki
+# 25.02.1's proto/anki/deck_config.proto — see configure_deck_options.py,
+# which uses these to defer review/relearning cards behind new cards so a
+# day's 5-card category group is never split up by a due review mid-burst.
+DECKCONFIG_FIELD_NEW_CARD_GATHER_PRIORITY: Final[int] = 34
+DECKCONFIG_FIELD_NEW_CARD_SORT_ORDER: Final[int] = 32
+DECKCONFIG_FIELD_NEW_MIX: Final[int] = 30  # "New/review order" in deck options UI
+DECKCONFIG_FIELD_INTERDAY_LEARNING_MIX: Final[int] = 31
+
+# ReviewMix enum: 0=mix with reviews (default), 1=after reviews, 2=before reviews.
+DECKCONFIG_REVIEW_MIX_BEFORE_REVIEWS: Final[int] = 2
+
+# NewCardGatherPriority values under which cards are gathered in ascending
+# `due`-position order (0=Deck, 1=LowestPosition) — required for the day-group
+# block ordering study_optimizer.py writes into `due` to actually take effect.
+# Every other value (random variants, or 2=HighestPosition which walks `due`
+# *backwards*) would scramble or invert it.
+DECKCONFIG_SAFE_GATHER_PRIORITIES: Final[frozenset[int]] = frozenset({0, 1})
+# NewCardSortOrder values that don't reshuffle after gathering (0=Template,
+# 1=NoSort — equivalent here since this notetype has a single template).
+DECKCONFIG_SAFE_SORT_ORDERS: Final[frozenset[int]] = frozenset({0, 1})
+
+# learn_steps / relearn_steps are `repeated float` (minutes per step).
+DECKCONFIG_FIELD_LEARN_STEPS: Final[int] = 1
+DECKCONFIG_FIELD_RELEARN_STEPS: Final[int] = 2
+# Desired step timings (was 5/10 learn, 15 relearn).
+DECKCONFIG_LEARN_STEPS_MINUTES: Final[tuple[float, ...]] = (10.0, 20.0)
+DECKCONFIG_RELEARN_STEPS_MINUTES: Final[tuple[float, ...]] = (30.0,)
 
 # Classifier settings
 CLASSIFY_BATCH_SIZE: Final[int] = 300

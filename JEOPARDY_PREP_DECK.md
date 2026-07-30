@@ -21,6 +21,9 @@ python smart_prep.py jeopardy_smart_prep.colpkg jeopardy_smart_prep.apkg
 
 # 3. Close Anki, then apply card ordering
 python study_optimizer.py
+
+# 4. One-time: make new cards show before reviews (see Study Queue Ordering)
+python configure_deck_options.py
 ```
 
 ### Refreshing (already studying — manual edits preserved)
@@ -70,19 +73,23 @@ Jeopardy Smart Prep::Archive   dead cards — out of rotation, never deleted
 
 ## Scripts & Files
 
-| File                      | Purpose                                                                                   |
-| ------------------------- | ----------------------------------------------------------------------------------------- |
-| `update_collection.py`    | Merges jwolle1 TSV clues (post-2019) into .colpkg                                         |
-| `classify_categories.py`  | LLM-classifies on-air categories → `category_taxonomy.json`                               |
-| `consolidate_taxonomy.py` | Post-processes taxonomy: merges synonyms, strips temporal noise, injects manual overrides |
-| `consolidate_decks.py`    | One-time merge of the legacy `Jeopardy` deck into `Jeopardy Smart Prep` (idempotent)      |
-| `archive_dead_cards.py`   | Moves dead cards to the Archive subdeck; `--restore` reverses it                          |
-| `smart_prep.py`           | Blended frequency scoring + field/template + tag writes                                   |
-| `jeopardy_consts.py`      | All constants: field indices, tier thresholds, recency weights, subjects                  |
-| `jeopardy_types.py`       | TypedDicts: `CategoryClassification`, `NoteRow`, `AnkiCardRow`, etc.                      |
-| `jeopardy_db_helpers.py`  | extract/repack .colpkg, SQLite helpers                                                    |
-| `category_taxonomy.json`  | LLM classification cache: `{CATEGORY: {subject, sub_category, secondary_subject}}`        |
-| `updated.colpkg`          | Merged 1984–2025 collection (source for Steps 2–5)                                        |
+| File                        | Purpose                                                                                   |
+| --------------------------- | ----------------------------------------------------------------------------------------- |
+| `update_collection.py`      | Merges jwolle1 TSV clues (post-2019) into .colpkg                                         |
+| `classify_categories.py`    | LLM-classifies on-air categories → `category_taxonomy.json`                               |
+| `consolidate_taxonomy.py`   | Post-processes taxonomy: merges synonyms, strips temporal noise, injects manual overrides |
+| `consolidate_decks.py`      | One-time merge of the legacy `Jeopardy` deck into `Jeopardy Smart Prep` (idempotent)      |
+| `add_subject_to_badge.py`   | One-time: adds the subject label back onto the frequency badge (idempotent)               |
+| `restore_category_front.py` | One-time: restores `{{Category}}` to the card front, off the back (idempotent)            |
+| `archive_dead_cards.py`     | Moves dead cards to the Archive subdeck; `--restore` reverses it                          |
+| `smart_prep.py`             | Blended frequency scoring + field/template + tag writes                                   |
+| `study_optimizer.py`        | Ease tuning + perf tags + day-category grouped/value-sorted new-card `due` order          |
+| `configure_deck_options.py` | One-time: sets deck options so new cards show before reviews (see *Study Queue Ordering*) |
+| `jeopardy_consts.py`        | All constants: field indices, tier thresholds, recency weights, subjects                  |
+| `jeopardy_types.py`         | TypedDicts: `CategoryClassification`, `NoteRow`, `AnkiCardRow`, etc.                      |
+| `jeopardy_db_helpers.py`    | extract/repack .colpkg, SQLite helpers                                                    |
+| `category_taxonomy.json`    | LLM classification cache: `{CATEGORY: {subject, sub_category, secondary_subject}}`        |
+| `updated.colpkg`            | Merged 1984–2025 collection (source for Steps 2–5)                                        |
 
 ---
 
@@ -145,13 +152,15 @@ Each note's frequency weight is multiplied by a stake multiplier reflecting the 
 
 The multiplier is computed per-note by `compute_stake_multiplier()` in `smart_prep.py`, reading fields 3 (Round), 7 (Value), and 8 (Daily Double). For non-Daily-Double clues in regular rounds, the multiplier scales linearly with dollar value within that round (no overlap between rounds).
 
-### secondary_subject (Wordplay + Domain) — ⚠️ currently inert
+### secondary_subject (Wordplay + Domain) — populated, but doesn't move tiers
 
 The intent: categories using a **wordplay format** (Before & After, Rhyme Time, Anagrams…) to test a **knowledge domain** — `SCIENCE BEFORE & AFTER` → `subject="Wordplay & Language"`, `secondary_subject="Science"` — should get credit for the domain they actually test, via `max(subject_score, secondary_subject_score)` and a `subcat2:` tag.
 
-**The scoring and tagging code for this works, but no data feeds it.** All 54,519 entries in `category_taxonomy.json` have an empty `secondary_subject`, so the `max()` never fires and `subcat2:` is never written. The classifier prompt does not currently produce the field.
+**The classifier prompt has always requested this field correctly** (`classify_categories.py` asks for and parses `secondary_subject` from the LLM). The bug was in `consolidate_taxonomy.py`: every rebuild path (`MANUAL_OVERRIDES`, catch-all elimination, the normal path, and the override-injection in `main()`) reconstructed each entry as `{subject, sub_category}` only, silently dropping `secondary_subject` — and the script overwrote `category_taxonomy.json` in place, destroying the classifier's original output with no way to recover it. Fixed 2026-07-28: `consolidate()` now carries `secondary_subject` through every path (with a guard that blanks it if it would ever equal the primary subject or `"Other"`), and the script defaults to writing a **new** file (`<input>.consolidated.json`) atomically instead of clobbering its input — pass `--output` explicitly to replace the input on purpose.
 
-This matters: Wordplay & Language is **22% of all recent-game clue volume**, the single largest subject, and much of it is a domain quiz wearing a wordplay costume. Populating this is the highest-value outstanding improvement — it requires a `classify_categories.py` prompt change plus a re-run.
+Re-running classification on the ~13,245 Wordplay & Language categories produced meaningfully different primary-subject calls for ~1,930 of them (mostly regressing to `Other/Miscellaneous`) — LLM judgment noise across runs, not signal. To avoid that churn, the fix was applied conservatively: every category's existing `subject`/`sub_category` was left untouched, and only `secondary_subject` was grafted in, and only where the reclassification's own subject call agreed with the original (stayed `Wordplay & Language` both times). Result: **2,642 of 13,245** Wordplay & Language categories (**15,020 cards**, 3.3% of the deck) now carry a non-empty `secondary_subject`, sampled and spot-checked for sanity (e.g. `METEOROLOGICAL RHYME TIME` → Science, `THE SUPERB OWL` → Sports, `BABEL-ING ON` → Religion & Mythology). `subcat2:` tags now appear on exactly those 15,020 notes.
+
+**However, re-scoring the live collection (2026-07-28) changed zero cards' `freq:` tier.** `subject_score["Wordplay & Language"]` (44,078, recency-weighted) is larger than *every* `secondary_subject_score` value (the largest, Geography, is 993) — Wordplay & Language is the single biggest subject bucket in the whole taxonomy, so no per-domain secondary slice can ever outweigh it in `max(subject_score, secondary_subject_score)`. The subject component of a wordplay card's blended score was already at its ceiling before this fix; populating `secondary_subject` makes the data honest and lights up `subcat2:` tags (useful for browsing/filtering — see *Useful Anki Browser Searches*), but changing the actual scoring/ranking would need a different formula — e.g. comparing subject and secondary percentiles instead of raw recency-weighted sums. Not implemented; a candidate follow-up if the ranking effect is wanted, not just the tag.
 
 ### Taxonomy Pipeline
 
@@ -229,6 +238,34 @@ Two traps that cost real accuracy here, both now guarded:
 
 ---
 
+## Study Queue Ordering
+
+`study_optimizer.py` doesn't just rank new cards individually — it groups each day's on-air category into a block so related clues surface together instead of being scattered across the deck.
+
+**Groups are up to 5 clues from one category board on one day** (`air_date`, `round`, on-air `category`), ordered **by dollar value, descending** ($1000 → $800 → … or $2000 → $1600 → … in Double Jeopardy) — highest-stakes clue first. Groups themselves are still ordered by the existing weakness-weighted frequency score (highest-priority category first; see *Blended Frequency Score* above), so this changes *presentation order within and around* a category, not which categories are prioritized.
+
+**Final Jeopardy is held out and interspersed, not grouped.** It's one clue/day with a 4x stake multiplier — grouped in with everything else, its outsized score would cluster every Final Jeopardy clue at the very front of the queue instead of spreading them out. Instead, FJ clues are ranked among themselves by the same priority score, then spread evenly across the whole queue (`interleave_blocks()`) so they show up every once in a while — measured at a steady ~14-15 groups apart (roughly one every 60-70 cards) on the current collection.
+
+### Fixed 2026-07-29: groups were spanning years, not days
+
+Groups were previously keyed on `(Show number, category)`. Show number (field 0) is blank on **~81,652 cards (18% of the deck)** — every clue merged in from the jwolle1 post-2019 TSV, via `update_collection.py`, which has no show-number column in its source data (`clue_to_note_fields()` deliberately leaves it `""`). With Show number blank, the group key collapsed to `("", category)` for all of them, so every reused broad category name — "AMERICAN HISTORY", "POTPOURRI", "BEFORE & AFTER" — merged into one group spanning years of games, exactly the symptom reported: a single category flooding the queue with unrelated clues from many different air dates.
+
+Fixed by keying groups on `(air_date, round, category)` instead — `air_date` is populated on **every** note, so it's a reliable per-game identifier regardless of source. `round` is included too, guarding the rare case (107 instances found) of the same category name reused in both the Jeopardy and Double Jeopardy rounds on the same day, which would otherwise merge into one 10-card group. Verified against the live collection: 0 of 90,465 resulting groups exceed 5 cards or span more than one category/air_date.
+
+### One-time setup: `configure_deck_options.py`
+
+Grouping cards via `due` order only controls which cards get pulled *from the new-card pool* — by default, Anki still freely interleaves due reviews in between them, so a review card could land in the middle of a 5-card group. Run once:
+
+```bash
+python configure_deck_options.py
+```
+
+This sets **New/review order** (and the equivalent interday-learning-mix setting) to **"before reviews"** for every deck options group, so new cards — and therefore whole category groups — are always exhausted before that day's review/relearning cards. It's idempotent (safe to re-run) and isn't part of the regular refresh loop.
+
+**What this can't fix:** a card you mark Again/Hard earlier in the *same session* re-enters the queue on its own learning-step timer regardless of this setting — that's Anki's short-term relearning behavior working as intended (you got it wrong; it's supposed to come back soon), and no deck option suppresses it. Only cross-session reviews and multi-day relearning are deferred behind new cards.
+
+---
+
 ## Useful Anki Browser Searches
 
 ```
@@ -284,6 +321,7 @@ Geography is the clear strength (Cities 94.2%, Countries 87.5%, Rivers & Lakes 8
 - [x] **Topic-liveness + card-age decay** — outdated material now scores low; see Algorithm above
 - [x] **Archive dead cards** — 42,886 cards (9.5%) parked in the Archive subdeck
 - [x] **Weakness-weighted card ordering** — `study_priority()` in `study_optimizer.py`
+- [x] **Day-category grouping, value order, Final Jeopardy interspersion** — fixed 2026-07-29: groups were keyed on `(Show number, category)`, but Show number is blank on 18% of the deck (the jwolle1 post-2019 import has no show-number column), collapsing every reused broad category name into one group spanning years of games. Regrouped on `(air_date, round, category)` — verified 0 of 90,465 groups now exceed 5 cards or span more than one category/date. Also added descending-value sort within each group and even interspersion of Final Jeopardy cards (`interleave_blocks()`). See *Study Queue Ordering* above. New one-time script `configure_deck_options.py` sets deck options so new cards show before reviews.
 
 ### Score Improvements
 
@@ -297,7 +335,7 @@ Geography is the clear strength (Cities 94.2%, Countries 87.5%, Rivers & Lakes 8
 
 ### Next up (highest value first)
 
-- [ ] **Populate `secondary_subject`** — the single biggest remaining win. Wordplay & Language is 22% of recent clue volume and much of it is a domain quiz in disguise, but the field is empty for all 54,519 categories so the feature is inert (see above). Needs a `classify_categories.py` prompt change + re-run.
+- [x] **Populate `secondary_subject`** — fixed 2026-07-28: the bug was in `consolidate_taxonomy.py` dropping the field on every write, not the classifier prompt (see above). 2,642 categories / 15,020 cards now carry it and get `subcat2:` tags. Re-scoring changed 0 cards' `freq:` tier, though — the `max(subject_score, secondary_subject_score)` formula can't move a card whose primary subject (Wordplay & Language) is already the largest bucket in the taxonomy. Making the ranking actually respond to this would need a different formula (percentile-based comparison instead of raw recency-weighted sums) — not done here.
 
 - [ ] **Fix the `Unclassified` bucket** — it is 11.1% of recent-game clue volume and the largest single group in your review history (392 reviews), yet those cards earn no topic credit in scoring and cannot be targeted by tag. Worth a focused classification pass over the highest-volume unclassified categories.
 

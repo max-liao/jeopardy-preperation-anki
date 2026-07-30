@@ -216,3 +216,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Jeopardy Smart Prep — generated Anki artifacts and DB backups, not source
+*.apkg
+*.colpkg
+*.bak

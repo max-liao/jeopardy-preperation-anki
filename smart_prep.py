@@ -53,6 +53,7 @@ from jeopardy_consts import (
     FREQ_FIELD_NAME,
     JEOPARDY_NOTETYPE_ID,
     RECENCY_WEIGHTS,
+    ROUND_FINAL_JEOPARDY,
     STAKE_DD_DJ,
     STAKE_DD_J,
     STAKE_DJ_MAX,
@@ -65,6 +66,7 @@ from jeopardy_consts import (
     STAKE_J_VALUE_MAX,
     STAKE_J_VALUE_MIN,
     SUBJECT_OTHER,
+    SUBJECT_BADGE_CLASS,
     TIER_BADGE_CLASS,
     TIER_HIGH_MIN,
     TIER_LOW_MIN,
@@ -181,7 +183,7 @@ def compute_stake_multiplier(
     rnd = round_name.strip()
     is_dd = daily_double_str.strip().lower() not in ("", "0", "false", "no")
 
-    if rnd == "Final Jeopardy":
+    if rnd == ROUND_FINAL_JEOPARDY:
         return STAKE_FINAL_JEOPARDY
     if is_dd:
         return STAKE_DD_DJ if rnd == "Double Jeopardy" else STAKE_DD_J
@@ -451,20 +453,25 @@ def badge_html(score: int, tier: Tier, subject: str) -> str:
 
     Kept deliberately tiny: this string is stored on every one of ~452K notes,
     so the styling lives in the card template (see BADGE_STYLE_BLOCK) and only
-    the score plus a one-character tier class is persisted. The tier is conveyed
-    by the badge colour, and the subject is already available as a `subject:`
-    tag, so neither is duplicated here.
+    the score plus short tier/subject class codes are persisted. The tier is
+    conveyed by the badge colour; the subject is rendered from its class code by
+    a CSS ::after rule, which costs ~4 bytes/note instead of the ~36 the literal
+    text plus markup would take. SUBJECT_OTHER carries no code, so those badges
+    render as the bare score.
 
     Args:
         score: 0-100 frequency score
         tier: Frequency tier, which selects the colour class
-        subject: Retained for signature compatibility; not stored on the note
+        subject: Broad subject, rendered into the badge via its class code
 
     Returns:
         Compact HTML for the note's Frequency Score field
     """
-    del subject  # available via the subject: tag; not worth ~9MB to duplicate
-    return f'<b class="fq {TIER_BADGE_CLASS.get(tier, "r")}">{score}</b>'
+    classes = f"fq {TIER_BADGE_CLASS.get(tier, 'r')}"
+    subject_code = SUBJECT_BADGE_CLASS.get(subject)
+    if subject_code:
+        classes = f"{classes} {subject_code}"
+    return f'<b class="{classes}">{score}</b>'
 
 
 def get_jeopardy_field_count(conn: sqlite3.Connection) -> int:

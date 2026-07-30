@@ -21,8 +21,10 @@ from jeopardy_consts import (
     EASE_BASE,
     EASE_MAX,
     EASE_MIN,
+    FIELD_AIR_DATE,
     FIELD_CATEGORY,
-    FIELD_SHOW_NUMBER,
+    FIELD_ROUND,
+    FIELD_VALUE,
     FREQ_EASE_PENALTY,
     JEOPARDY_NOTETYPE_ID,
     MIN_REVIEWS_FOR_CARD_PERF,
@@ -30,15 +32,17 @@ from jeopardy_consts import (
     PERF_WEAK_THRESHOLD,
     PRIOR_ACCURACY,
     PRIOR_WEIGHT,
+    ROUND_FINAL_JEOPARDY,
     TOTAL_FIELDS,
     WEAKNESS_EASE_PENALTY,
     WEAKNESS_PRIORITY_BOOST,
 )
-from jeopardy_db_helpers import connect_anki
+from jeopardy_db_helpers import connect_anki, strip_html_media
 
 logger = logging.getLogger(__name__)
 
 _FREQ_SCORE_RE = re.compile(r'class="fq [hmlr]">(\d+)<')
+_VALUE_RE = re.compile(r"(\d[\d,]*)")
 _TIER_SCORE_FALLBACK: Final[dict[str, int]] = {
     "high": 75,
     "medium": 55,
@@ -62,7 +66,9 @@ class CardRecord(TypedDict):
     freq_tier: str
     freq_score: int
     category: str
-    show_number: str
+    air_date: str
+    round_name: str
+    value_rank: int
     subcat: str
     subject: str
     card_type: int
@@ -117,6 +123,23 @@ def _strip_perf_tags(tags: str) -> list[str]:
     return [t for t in tags.split() if not any(t.startswith(p) for p in _PERF_PREFIXES)]
 
 
+def parse_card_value(value_str: str) -> int:
+    """Extract the integer dollar amount from a Value field, for in-group sorting.
+
+    Two source formats are mixed in this collection: the legacy pre-2019 deck
+    writes daily doubles as "DD: $1,000" (comma thousands, "DD: " prefix), while
+    the jwolle1 post-2019 import writes plain "$1600" (no comma) for every clue
+    including daily doubles. A regex search over the digits handles both
+    uniformly rather than special-casing the prefix.
+
+    Returns -1 (sorts last under a descending sort) for blank or malformed
+    values (Final Jeopardy has no fixed value; a handful of legacy rows have
+    junk like "()").
+    """
+    m = _VALUE_RE.search(strip_html_media(value_str))
+    return int(m.group(1).replace(",", "")) if m else -1
+
+
 def load_card_stats(conn: sqlite3.Connection) -> dict[int, CardRecord]:
     """Load all Jeopardy cards with scheduling and note tag data."""
     cursor = conn.cursor()
@@ -144,10 +167,15 @@ def load_card_stats(conn: sqlite3.Connection) -> dict[int, CardRecord]:
     ) in cursor.fetchall():
         freq_tier, subcat, subject = _parse_tags(tags)
         parts = flds.split("\x1f")
-        show_number = (
-            parts[FIELD_SHOW_NUMBER].strip() if len(parts) > FIELD_SHOW_NUMBER else ""
-        )
+        # air_date is populated on every note, unlike Show number (blank for
+        # ~18% of the deck — see the grouping comment in main()), so it's
+        # read here for use as the day-grouping key.
+        air_date = parts[FIELD_AIR_DATE].strip() if len(parts) > FIELD_AIR_DATE else ""
+        round_name = parts[FIELD_ROUND].strip() if len(parts) > FIELD_ROUND else ""
         category = parts[FIELD_CATEGORY].strip() if len(parts) > FIELD_CATEGORY else ""
+        value_rank = parse_card_value(
+            parts[FIELD_VALUE] if len(parts) > FIELD_VALUE else ""
+        )
         freq_score = _TIER_SCORE_FALLBACK.get(freq_tier, 30)
         if len(parts) > TOTAL_FIELDS:
             m = _FREQ_SCORE_RE.search(parts[TOTAL_FIELDS])
@@ -159,7 +187,9 @@ def load_card_stats(conn: sqlite3.Connection) -> dict[int, CardRecord]:
             "freq_tier": freq_tier,
             "freq_score": freq_score,
             "category": category,
-            "show_number": show_number,
+            "air_date": air_date,
+            "round_name": round_name,
+            "value_rank": value_rank,
             "subcat": subcat,
             "subject": subject,
             "card_type": card_type,
@@ -272,6 +302,41 @@ def study_priority(freq_score: int, subcat_accuracy: float) -> float:
     answered at 95%.
     """
     return freq_score * (1.0 + WEAKNESS_PRIORITY_BOOST * (1.0 - subcat_accuracy))
+
+
+def interleave_blocks(
+    main: list[list[int]], sparse: list[list[int]]
+) -> list[list[int]]:
+    """Spread `sparse` blocks evenly across `main`, preserving each side's own order.
+
+    Used to intersperse Final Jeopardy cards (each a 1-card `sparse` block) among
+    the day-category groups (each a `main` block of up to 5 card IDs, already
+    value-sorted) at a roughly constant cadence — "every once in a while" rather
+    than wherever they happen to fall when everything is ranked by raw score
+    (Final Jeopardy's 4x stake multiplier would otherwise cluster them all at
+    the front of the queue).
+
+    A block is a `list[int]` of card IDs meant to be shown consecutively; both
+    `main` and `sparse` are lists of such blocks. Neither list is re-sorted —
+    ordering within and across blocks is decided by the caller.
+    """
+    if not sparse:
+        return list(main)
+    if not main:
+        return list(sparse)
+    result: list[list[int]] = []
+    step = len(main) / len(sparse)
+    next_threshold = step
+    sparse_idx = 0
+    for i, block in enumerate(main, start=1):
+        result.append(block)
+        while sparse_idx < len(sparse) and i >= next_threshold:
+            result.append(sparse[sparse_idx])
+            sparse_idx += 1
+            next_threshold += step
+    # Floating-point rounding can leave the last sparse item(s) unplaced.
+    result.extend(sparse[sparse_idx:])
+    return result
 
 
 def compute_ease(freq_tier: str, weakness_tier: str) -> int:
@@ -454,7 +519,8 @@ def main() -> None:
     tag_updates_by_note: dict[int, str] = {}
     ease_deltas: list[int] = []
     perf_counts: dict[str, int] = defaultdict(int)
-    cat_groups: dict[tuple[str, str], list[tuple[float, int]]] = defaultdict(list)
+    cat_groups: dict[tuple[str, str, str], list[tuple[float, int]]] = defaultdict(list)
+    fj_cards: list[tuple[float, int]] = []
 
     for rec in cards.values():
         note_id = rec["note_id"]
@@ -486,21 +552,59 @@ def main() -> None:
                 )
 
         if rec["card_type"] == 0 and not rec["archived"]:
-            group_key = (rec["show_number"], rec["category"])
-            cat_groups[group_key].append(
-                (study_priority(rec["freq_score"], subcat_acc), card_id)
-            )
+            priority = study_priority(rec["freq_score"], subcat_acc)
+            if rec["round_name"] == ROUND_FINAL_JEOPARDY:
+                # No grouping partner (one clue/day), and its 4x stake
+                # multiplier would otherwise cluster every FJ card at the
+                # front of the queue if ranked in with everything else by raw
+                # score. Held out and interspersed evenly below instead.
+                fj_cards.append((priority, card_id))
+            else:
+                # Grouped by air_date rather than Show number: the post-2019
+                # jwolle1 import (see update_collection.py) never populates
+                # Show number, so that field is blank for ~18% of the deck —
+                # every blank-Show-number card sharing a reused category name
+                # (e.g. "AMERICAN HISTORY") collapsed into one giant group
+                # spanning years of games. air_date is populated on every
+                # note. round_name is included too, to keep the (rare) case
+                # of the same category name reused in both rounds on the same
+                # day from merging into a single 10-card group.
+                group_key = (rec["air_date"], rec["round_name"], rec["category"])
+                cat_groups[group_key].append((priority, card_id))
 
-    # Sort category groups by total freq score (highest first), then assign due positions.
-    sorted_groups = sorted(
-        cat_groups.items(),
-        key=lambda item: sum(score for score, _ in item[1]),
-        reverse=True,
-    )
+    # Order each day's category group by descending dollar value ($1000 ->
+    # $800 -> ...), tie-broken by study priority then card ID for determinism.
+    # (compute_stake_multiplier already used this hierarchy to weight the
+    # frequency score — this is purely presentation order within the group.)
+    scored_groups: list[tuple[float, list[int]]] = []
+    for card_entries in cat_groups.values():
+        ordered = sorted(
+            card_entries,
+            key=lambda e: (-cards[e[1]]["value_rank"], -e[0], e[1]),
+        )
+        block = [card_id for _score, card_id in ordered]
+        scored_groups.append((sum(score for score, _ in card_entries), block))
+
+    # Sort the groups themselves by total freq score (highest first) — same
+    # weakness-weighted priority as before, now decoupled from within-group
+    # (value) order.
+    sorted_groups = [
+        block
+        for _total, block in sorted(scored_groups, key=lambda x: x[0], reverse=True)
+    ]
+
+    # Rank Final Jeopardy cards among themselves the same way, then spread
+    # them evenly across the whole queue so they show up every once in a
+    # while rather than all at once.
+    fj_blocks = [
+        [card_id] for _score, card_id in sorted(fj_cards, key=lambda e: (-e[0], e[1]))
+    ]
+    merged_blocks = interleave_blocks(sorted_groups, fj_blocks)
+
     due_updates: list[tuple[int, int]] = []
     pos = 1
-    for _key, card_entries in sorted_groups:
-        for _score, card_id in sorted(card_entries, key=lambda e: (-e[0], e[1])):
+    for block in merged_blocks:
+        for card_id in block:
             due_updates.append((pos, card_id))
             pos += 1
     tag_updates: list[tuple[str, int]] = [

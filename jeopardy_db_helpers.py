@@ -5,7 +5,9 @@ import logging
 import re
 import shutil
 import sqlite3
+import struct
 import zipfile
+from collections.abc import Sequence
 from pathlib import Path
 
 import zstandard
@@ -119,23 +121,60 @@ def connect_anki(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
+def _pid_holding(db_path: Path) -> int | None:
+    """Return the pid of a process with `db_path` open, if any (Linux /proc)."""
+    proc = Path("/proc")
+    if not proc.is_dir():
+        return None
+    target = db_path.resolve()
+    for pid_dir in proc.iterdir():
+        if not pid_dir.name.isdigit():
+            continue
+        try:
+            for fd in (pid_dir / "fd").iterdir():
+                try:
+                    if fd.resolve() == target:
+                        return int(pid_dir.name)
+                except OSError:
+                    continue
+        except OSError:
+            # Process exited mid-scan, or belongs to another user.
+            continue
+    return None
+
+
 def require_anki_closed(db_path: Path) -> None:
     """Exit if Anki still holds the collection open.
 
-    Anki keeps a non-empty write-ahead log while running; writing underneath it
-    corrupts the collection. Every script that mutates the live DB calls this
-    first.
+    Writing underneath a running Anki corrupts the collection, and anything that
+    survives is overwritten when Anki next saves. Every script that mutates the
+    live DB calls this first.
+
+    Two checks, because neither alone is sufficient: a non-empty write-ahead log
+    means Anki has uncheckpointed writes, but Anki also runs with a 0-byte WAL,
+    so the WAL check alone lets writes through while Anki is open. The /proc scan
+    catches that case by finding the process actually holding the file.
 
     Args:
         db_path: Path to the live collection.anki2
 
     Raises:
-        SystemExit: If a non-empty WAL file is present
+        SystemExit: If a non-empty WAL file is present, or a process holds the
+            collection open
     """
     wal_path = db_path.with_name(db_path.name + "-wal")
     if wal_path.exists() and wal_path.stat().st_size > 0:
         logger.error(
             "Anki appears to be running (WAL present: %s). Close Anki first.", wal_path
+        )
+        raise SystemExit(1)
+
+    pid = _pid_holding(db_path)
+    if pid is not None:
+        logger.error(
+            "Anki appears to be running (pid %d has %s open). Close Anki first.",
+            pid,
+            db_path,
         )
         raise SystemExit(1)
 
@@ -363,6 +402,219 @@ def protobuf_prepend_to_field1(config: bytes, prefix: str) -> bytes:
             pos += 8
         else:
             raise ValueError(f"Unsupported protobuf wire type {wire_type}")
+    return bytes(out)
+
+
+def protobuf_get_field(config: bytes, field_num: int) -> bytes | None:
+    """Return the raw bytes of length-delimited protobuf `field_num`, or None.
+
+    Args:
+        config: The serialized CardTemplateConfig blob
+        field_num: Field number to extract (1 = q_format, 2 = a_format)
+
+    Returns:
+        The field's value, or None if absent
+
+    Raises:
+        ValueError: On an unsupported wire type
+    """
+    pos = 0
+    n = len(config)
+    while pos < n:
+        tag, pos = _read_varint(config, pos)
+        wire_type = tag & 0x7
+        if wire_type == 2:
+            length, pos = _read_varint(config, pos)
+            value = config[pos : pos + length]
+            pos += length
+            if (tag >> 3) == field_num:
+                return value
+        elif wire_type == 0:
+            _, pos = _read_varint(config, pos)
+        elif wire_type == 5:
+            pos += 4
+        elif wire_type == 1:
+            pos += 8
+        else:
+            raise ValueError(f"Unsupported protobuf wire type {wire_type}")
+    return None
+
+
+def protobuf_get_packed_float_field(
+    config: bytes, field_num: int
+) -> list[float] | None:
+    """Return the floats in a packed `repeated float` protobuf field, or None if absent.
+
+    Proto3 encodes `repeated float` as a single length-delimited field (wire
+    type 2) containing consecutive 4-byte little-endian floats — e.g. Anki's
+    DeckConfig.Config `learn_steps`/`relearn_steps` (minutes per step).
+
+    Args:
+        config: The serialized protobuf message
+        field_num: Field number to extract
+
+    Returns:
+        Decoded floats in order, or None if the field is absent
+
+    Raises:
+        ValueError: On an unsupported wire type
+    """
+    raw = protobuf_get_field(config, field_num)
+    if raw is None:
+        return None
+    count = len(raw) // 4
+    return list(struct.unpack(f"<{count}f", raw[: count * 4]))
+
+
+def encode_packed_floats(values: Sequence[float]) -> bytes:
+    """Encode floats as protobuf packed-`repeated float` bytes (4 bytes each, little-endian).
+
+    Pass the result to `protobuf_replace_fields` to write a `repeated float`
+    field such as DeckConfig.Config `learn_steps`/`relearn_steps`.
+    """
+    return b"".join(struct.pack("<f", v) for v in values)
+
+
+def protobuf_replace_fields(config: bytes, replacements: dict[int, bytes]) -> bytes:
+    """Replace the values of one or more length-delimited fields, byte-for-byte
+    otherwise. Companion to `protobuf_prepend_to_field1` for full-value swaps.
+
+    Args:
+        config: The serialized CardTemplateConfig blob
+        replacements: field number -> new raw value
+
+    Returns:
+        The modified blob
+
+    Raises:
+        ValueError: On an unsupported wire type
+    """
+    out = bytearray()
+    pos = 0
+    n = len(config)
+    while pos < n:
+        tag, pos = _read_varint(config, pos)
+        field_num = tag >> 3
+        wire_type = tag & 0x7
+        if wire_type == 2:
+            length, pos = _read_varint(config, pos)
+            value = config[pos : pos + length]
+            pos += length
+            if field_num in replacements:
+                value = replacements[field_num]
+            out += _encode_varint(tag)
+            out += _encode_varint(len(value))
+            out += value
+        elif wire_type == 0:
+            value_int, pos = _read_varint(config, pos)
+            out += _encode_varint(tag)
+            out += _encode_varint(value_int)
+        elif wire_type == 5:
+            out += _encode_varint(tag)
+            out += config[pos : pos + 4]
+            pos += 4
+        elif wire_type == 1:
+            out += _encode_varint(tag)
+            out += config[pos : pos + 8]
+            pos += 8
+        else:
+            raise ValueError(f"Unsupported protobuf wire type {wire_type}")
+    return bytes(out)
+
+
+def protobuf_get_varint_field(config: bytes, field_num: int) -> int | None:
+    """Return the integer value of varint protobuf `field_num`, or None if absent.
+
+    Companion to `protobuf_get_field` for scalar/enum fields (wire type 0 —
+    e.g. every enum in Anki's DeckConfig.Config message), which that function
+    doesn't decode (it only returns length-delimited field 2 values). Proto3
+    omits a field entirely when it holds the default (zero) value, so `None`
+    here means "unset, so effectively zero," not "corrupt."
+
+    Args:
+        config: The serialized protobuf message
+        field_num: Field number to extract
+
+    Returns:
+        The field's integer value, or None if absent
+
+    Raises:
+        ValueError: On an unsupported wire type
+    """
+    pos = 0
+    n = len(config)
+    result: int | None = None
+    while pos < n:
+        tag, pos = _read_varint(config, pos)
+        wire_type = tag & 0x7
+        if wire_type == 0:
+            value, pos = _read_varint(config, pos)
+            if (tag >> 3) == field_num:
+                result = value
+        elif wire_type == 2:
+            length, pos = _read_varint(config, pos)
+            pos += length
+        elif wire_type == 5:
+            pos += 4
+        elif wire_type == 1:
+            pos += 8
+        else:
+            raise ValueError(f"Unsupported protobuf wire type {wire_type}")
+    return result
+
+
+def protobuf_set_varint_field(config: bytes, field_num: int, value: int) -> bytes:
+    """Set varint protobuf `field_num` to `value`, preserving every other field.
+
+    Companion to `protobuf_replace_fields` for scalar/enum fields (wire type
+    0). Any existing occurrence of `field_num` is dropped and a single fresh
+    one appended at the end — protobuf parsers take the last occurrence of a
+    singular field on the wire, so this is functionally a replace, but
+    dropping the stale bytes first keeps the blob from growing on repeated
+    runs (this is meant to be safe to run more than once).
+
+    Args:
+        config: The serialized protobuf message
+        field_num: Field number to set
+        value: New integer value
+
+    Returns:
+        The modified blob
+
+    Raises:
+        ValueError: On an unsupported wire type
+    """
+    out = bytearray()
+    pos = 0
+    n = len(config)
+    while pos < n:
+        tag, pos = _read_varint(config, pos)
+        this_field = tag >> 3
+        wire_type = tag & 0x7
+        if wire_type == 0:
+            existing, pos = _read_varint(config, pos)
+            if this_field != field_num:
+                out += _encode_varint(tag)
+                out += _encode_varint(existing)
+        elif wire_type == 2:
+            length, pos = _read_varint(config, pos)
+            raw = config[pos : pos + length]
+            pos += length
+            out += _encode_varint(tag)
+            out += _encode_varint(len(raw))
+            out += raw
+        elif wire_type == 5:
+            out += _encode_varint(tag)
+            out += config[pos : pos + 4]
+            pos += 4
+        elif wire_type == 1:
+            out += _encode_varint(tag)
+            out += config[pos : pos + 8]
+            pos += 8
+        else:
+            raise ValueError(f"Unsupported protobuf wire type {wire_type}")
+    out += _encode_varint((field_num << 3) | 0)
+    out += _encode_varint(value)
     return bytes(out)
 
 
