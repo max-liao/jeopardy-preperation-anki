@@ -171,7 +171,7 @@ PRESIDENCIES: tuple[Presidency, ...] = (
         "Democratic-Republican",
         ("Daniel D. Tompkins",),
         (
-            "Monroe Doctrine (1823)",
+            "Declared the Americas off-limits to further European colonization (1823)",
             "Missouri Compromise (1820)",
             "“Era of Good Feelings”",
         ),
@@ -226,7 +226,7 @@ PRESIDENCIES: tuple[Presidency, ...] = (
         ("None (office vacant)",),
         (
             "First VP to succeed a president who died in office",
-            "Established the “Tyler Precedent” for succession",
+            "Established that a VP fully assumes the presidency (not just its duties) on a president's death",
             "Annexation of Texas",
         ),
     ),
@@ -481,7 +481,7 @@ PRESIDENCIES: tuple[Presidency, ...] = (
             "Ended WWII / atomic bombings of Japan",
             "Marshall Plan",
             "Korean War",
-            "Truman Doctrine (containment)",
+            "Pledged U.S. support for countries resisting communism (containment policy)",
         ),
     ),
     Presidency(
@@ -560,7 +560,7 @@ PRESIDENCIES: tuple[Presidency, ...] = (
         "Republican",
         ("George H. W. Bush",),
         (
-            "“Reaganomics” supply-side policy",
+            "Supply-side, tax-cutting economic policy (“trickle-down economics”)",
             "Diplomacy that hastened the end of the Cold War",
             "Iran-Contra affair",
             "Survived an assassination attempt (1981)",
