@@ -5,7 +5,7 @@ description = "Default template for PDM package"
 authors = [
     {name = "Max",email = "max.liao@gmail.com"},
 ]
-dependencies = ["zstandard>=0.25.0"]
+dependencies = ["zstandard>=0.25.0", "genanki>=0.13.1"]
 requires-python = "==3.12.*"
 readme = "README.md"
 license = {text = "MIT"}
@@ -19,3 +19,6 @@ dev = [
 ]
 [tool.pdm]
 distribution = false
+
+[tool.mypy]
+mypy_path = "stubs"
