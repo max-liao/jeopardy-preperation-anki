@@ -23,7 +23,7 @@ python smart_prep.py jeopardy_smart_prep.colpkg jeopardy_smart_prep.apkg
 python study_optimizer.py
 
 # 4. One-time: make new cards show before reviews (see Study Queue Ordering)
-python configure_deck_options.py
+python configure_deck_options.py --preset Jeopardy
 ```
 
 ### Refreshing (already studying — manual edits preserved)
@@ -84,7 +84,7 @@ Jeopardy Smart Prep::Archive   dead cards — out of rotation, never deleted
 | `archive_dead_cards.py`     | Moves dead cards to the Archive subdeck; `--restore` reverses it                          |
 | `smart_prep.py`             | Blended frequency scoring + field/template + tag writes                                   |
 | `study_optimizer.py`        | Ease tuning + perf tags + day-category grouped/value-sorted new-card `due` order          |
-| `configure_deck_options.py` | One-time: sets deck options so new cards show before reviews (see *Study Queue Ordering*) |
+| `configure_deck_options.py` | One-time: new cards before reviews; `--preset` scopes it (see *Study Queue Ordering*)     |
 | `jeopardy_consts.py`        | All constants: field indices, tier thresholds, recency weights, subjects                  |
 | `jeopardy_types.py`         | TypedDicts: `CategoryClassification`, `NoteRow`, `AnkiCardRow`, etc.                      |
 | `jeopardy_db_helpers.py`    | extract/repack .colpkg, SQLite helpers                                                    |
@@ -257,10 +257,14 @@ Fixed by keying groups on `(air_date, round, category)` instead — `air_date` i
 Grouping cards via `due` order only controls which cards get pulled *from the new-card pool* — by default, Anki still freely interleaves due reviews in between them, so a review card could land in the middle of a 5-card group. Run once:
 
 ```bash
-python configure_deck_options.py
+python configure_deck_options.py --preset Jeopardy
 ```
 
-This sets **New/review order** (and the equivalent interday-learning-mix setting) to **"before reviews"** for every deck options group, so new cards — and therefore whole category groups — are always exhausted before that day's review/relearning cards. It's idempotent (safe to re-run) and isn't part of the regular refresh loop.
+This sets **New/review order** (and the equivalent interday-learning-mix setting) to **"before reviews"**, so new cards — and therefore whole category groups — are always exhausted before that day's review/relearning cards. It's idempotent (safe to re-run) and isn't part of the regular refresh loop.
+
+Without `--preset` it applies to **every** deck options group in the collection, which will also retune unrelated decks (Chinese, French, …) that want their own step timings. Pass the preset name.
+
+> **This setting lives on the preset, not the deck — creating a new preset silently reverts it.** Assigning `Jeopardy Smart Prep` to a freshly-created options preset in the Anki GUI starts it from Anki's stock defaults ("mix with reviews", learn 1m/10m), regardless of what the old preset had. This is not theoretical: it happened between 2026-07-29 and 2026-08-01 and made a study session look like the grouping fix had failed, when the `due` order was in fact correct the whole time. If groups start getting interrupted again, check the preset first with `python configure_deck_options.py --dry-run` — it reports the current values for every preset and warns if the gather/sort order would break `due` ordering.
 
 **What this can't fix:** a card you mark Again/Hard earlier in the *same session* re-enters the queue on its own learning-step timer regardless of this setting — that's Anki's short-term relearning behavior working as intended (you got it wrong; it's supposed to come back soon), and no deck option suppresses it. Only cross-session reviews and multi-day relearning are deferred behind new cards.
 

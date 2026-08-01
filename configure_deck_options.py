@@ -27,6 +27,7 @@ reviews and multi-day relearning are deferred by this change.
 
 Usage:
   python configure_deck_options.py [--db PATH] [--dry-run] [--no-backup]
+                                    [--preset NAME [NAME ...]]
                                     [--learn-steps M [M ...]]
                                     [--relearn-steps M [M ...]]
 """
@@ -203,6 +204,13 @@ def main() -> None:
     parser.add_argument("--dry-run", action="store_true", help="report without writing")
     parser.add_argument("--no-backup", action="store_true", help="skip the .bak copy")
     parser.add_argument(
+        "--preset",
+        nargs="+",
+        metavar="NAME",
+        help="Only touch these deck options presets, by name (default: all). "
+        "Anki decks other than Jeopardy usually want their own step timings.",
+    )
+    parser.add_argument(
         "--learn-steps",
         nargs="+",
         type=float,
@@ -228,7 +236,19 @@ def main() -> None:
 
     conn = connect_anki(db_path)
     rows = conn.execute("SELECT id, name, config FROM deck_config").fetchall()
-    logger.info("%d deck options group(s) found", len(rows))
+    if args.preset:
+        wanted = set(args.preset)
+        unknown = wanted - {name for _id, name, _cfg in rows}
+        if unknown:
+            logger.error(
+                "No such deck options preset(s): %s. Available: %s",
+                ", ".join(sorted(unknown)),
+                ", ".join(sorted(name for _id, name, _cfg in rows)),
+            )
+            conn.close()
+            sys.exit(1)
+        rows = [r for r in rows if r[1] in wanted]
+    logger.info("%d deck options group(s) to process", len(rows))
 
     updates: list[tuple[bytes, int, int]] = []
     for deck_config_id, name, config in rows:
