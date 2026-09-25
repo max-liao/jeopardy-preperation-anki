@@ -47,7 +47,12 @@ from decks.trivia.jeopardy.jeopardy_taxonomy_helpers import (
     clue_log_likelihood,
     clue_words,
 )
-from decks.trivia.jeopardy.jeopardy_types import CardSubject, CardText, ClueVocabulary, TaxonomyEntry
+from decks.trivia.jeopardy.jeopardy_types import (
+    CardSubject,
+    CardText,
+    ClueVocabulary,
+    TaxonomyEntry,
+)
 
 
 def card_source_subject(

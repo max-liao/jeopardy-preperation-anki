@@ -4,8 +4,8 @@ Scripts that build, score and edit decks in a personal Anki collection. Decks fa
 
 | Group | Decks | What the scripts do |
 | --- | --- | --- |
-| **Trivia** — [`decks/trivia/`](decks/trivia/README.md) | Jeopardy Smart Prep (≈409K cards), US Presidents (49) | Build and score the deck from source data; refresh it in place while Anki is **closed** |
-| **Foreign language** — [`decks/language/`](decks/language/README.md) | Français, Español, 中文 | You flag cards in Anki (blue = pronunciation, green = image, orange = context); a script proposes the edit, you review, it applies and clears the flag. Runs against Anki while it is **open**, through AnkiConnect |
+| **Trivia** — [`decks/trivia/`](decks/trivia/TRIVIA_DECKS.md) | Jeopardy Smart Prep (≈409K cards), US Presidents (49) | Build and score the deck from source data; refresh it in place while Anki is **closed** |
+| **Foreign language** — [`decks/language/`](decks/language/LANGUAGE_DECKS.md) | Français, Español, 中文 | You flag cards in Anki (blue = pronunciation, green = image, orange = context); a script proposes the edit, you review, it applies and clears the flag. Runs against Anki while it is **open**, through AnkiConnect |
 
 More decks may be added later, but only within these two groups.
 
@@ -21,8 +21,9 @@ decks/
   trivia/
     jeopardy/                 scoring, taxonomy, live refresh, data/, tests/, its own docs
     us_presidents/            genanki builder for the US Presidents deck
-  language/                   flag-driven automation (spec + decision log in its README)
+  language/                   flag-driven automation (spec + decision log in LANGUAGE_DECKS.md)
 stubs/                        vendored .pyi stubs (no `# type: ignore` in this repo)
+CLAUDE.md                     project-specific Claude Code conventions and rules
 coding-requirements.md        the coding rules every change follows
 ```
 
@@ -34,7 +35,7 @@ python -m decks.trivia.us_presidents.build_presidents_deck
 python -m pytest                       # all tests
 ```
 
-Deck procedures are documented next to the code: start with [`decks/trivia/jeopardy/JEOPARDY_PREP_DECK.md`](decks/trivia/jeopardy/JEOPARDY_PREP_DECK.md) or [`decks/language/README.md`](decks/language/README.md).
+Deck procedures are documented next to the code: start with [`decks/trivia/jeopardy/JEOPARDY_PREP_DECK.md`](decks/trivia/jeopardy/JEOPARDY_PREP_DECK.md) or [`decks/language/LANGUAGE_DECKS.md`](decks/language/LANGUAGE_DECKS.md).
 
 ## Two ways of touching Anki — never mix them
 

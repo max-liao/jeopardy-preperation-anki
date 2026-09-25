@@ -12,7 +12,6 @@ Usage:
 
 import argparse
 import json
-import os
 import re
 import shutil
 import sqlite3
@@ -214,9 +213,7 @@ class JeopardyFilter:
         )
 
         # Prune revlog table (optional, keeps only logs for remaining cards)
-        cursor.execute(
-            "DELETE FROM revlog WHERE cid NOT IN (SELECT id FROM cards)"
-        )
+        cursor.execute("DELETE FROM revlog WHERE cid NOT IN (SELECT id FROM cards)")
 
         # Prune graves table
         cursor.execute("DELETE FROM graves WHERE oid NOT IN (SELECT id FROM notes)")
@@ -246,9 +243,7 @@ class JeopardyFilter:
         for filename in media_refs:
             src = self.extract_dir / filename
             if src.exists():
-                dst_idx = list(media_manifest.values()).index(filename)
                 # Media files are stored as numeric indices in the ZIP
-                dst = self.extract_dir / str(dst_idx)
                 # Actually, we keep the original filenames in the extract_dir,
                 # but the manifest maps index -> filename. The ZIP structure
                 # stores media files as 0, 1, 2, etc., named by index.
@@ -303,12 +298,8 @@ def main():
     parser.add_argument(
         "--date-end", type=int, help="Maximum air date year (inclusive)"
     )
-    parser.add_argument(
-        "--value-min", type=int, help="Minimum clue value in dollars"
-    )
-    parser.add_argument(
-        "--value-max", type=int, help="Maximum clue value in dollars"
-    )
+    parser.add_argument("--value-min", type=int, help="Minimum clue value in dollars")
+    parser.add_argument("--value-max", type=int, help="Maximum clue value in dollars")
     parser.add_argument(
         "--round",
         help='Filter by round: "Jeopardy", "Double Jeopardy", "Final Jeopardy"',
@@ -322,6 +313,7 @@ def main():
 
     args = parser.parse_args()
 
+    filt: JeopardyFilter | None = None
     try:
         filt = JeopardyFilter(args.source)
         filt.extract_colpkg()
@@ -341,7 +333,7 @@ def main():
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
     finally:
-        if "filt" in locals():
+        if filt is not None:
             filt.cleanup()
 
 

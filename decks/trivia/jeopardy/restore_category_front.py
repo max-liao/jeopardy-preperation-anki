@@ -22,7 +22,11 @@ import sys
 import time
 from pathlib import Path
 
-from decks.trivia.jeopardy.jeopardy_consts import ANKI_COLLECTION_PATH, JEOPARDY_NOTETYPE_ID, USN_PENDING
+from decks.trivia.jeopardy.jeopardy_consts import (
+    ANKI_COLLECTION_PATH,
+    JEOPARDY_NOTETYPE_ID,
+    USN_PENDING,
+)
 from decks.trivia.jeopardy.jeopardy_db_helpers import (
     connect_anki,
     protobuf_get_field,

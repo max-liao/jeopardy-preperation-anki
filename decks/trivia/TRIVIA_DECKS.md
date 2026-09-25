@@ -1,6 +1,6 @@
 # Trivia decks
 
-Trivia decks are built from source data and then refreshed in place in the live collection with **Anki closed**. This is the older of the two deck families; the flag-driven language tooling in [`../language/`](../language/README.md) works differently (Anki open, through AnkiConnect).
+Trivia decks are built from source data and then refreshed in place in the live collection with **Anki closed**. This is the older of the two deck families; the flag-driven language tooling in [`../language/`](../language/LANGUAGE_DECKS.md) works differently (Anki open, through AnkiConnect).
 
 | Deck | Folder | Source data | How it reaches Anki |
 | --- | --- | --- | --- |

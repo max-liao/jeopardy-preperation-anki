@@ -36,7 +36,10 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Literal
 
-from decks.trivia.jeopardy.consolidate_taxonomy import MANUAL_OVERRIDES, NO_CARD_SUBJECTS
+from decks.trivia.jeopardy.consolidate_taxonomy import (
+    MANUAL_OVERRIDES,
+    NO_CARD_SUBJECTS,
+)
 from decks.trivia.jeopardy.jeopardy_card_helpers import label_cards
 from decks.trivia.jeopardy.jeopardy_consts import (
     BADGE_STYLE_BLOCK,
@@ -111,7 +114,11 @@ from decks.trivia.jeopardy.jeopardy_taxonomy_helpers import (
     group_cards_by_category,
     reclassify_by_evidence,
 )
-from decks.trivia.jeopardy.jeopardy_types import CardSubject, CardText, EvidenceReclassification
+from decks.trivia.jeopardy.jeopardy_types import (
+    CardSubject,
+    CardText,
+    EvidenceReclassification,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -753,7 +760,9 @@ def add_frequency_fields_and_template(conn: sqlite3.Connection) -> tuple[int, in
             prefix = "{{#Frequency Score}}{{Frequency Score}}{{/Frequency Score}}\n"
             new_config = protobuf_prepend_to_field1(new_config, prefix)
         if b"Frequency Details" not in new_config:
-            suffix = "\n{{#Frequency Details}}{{Frequency Details}}{{/Frequency Details}}"
+            suffix = (
+                "\n{{#Frequency Details}}{{Frequency Details}}{{/Frequency Details}}"
+            )
             afmt = protobuf_get_field(new_config, 2)
             if afmt is not None:
                 new_config = protobuf_replace_fields(
@@ -911,7 +920,7 @@ def print_report(
 
     secondary_count = sum(1 for m in meta.values() if m[4])
     print(
-        f"\nCards with secondary_subject (wordplay+domain): {secondary_count:,} ({100.0*secondary_count/total:.1f}%)"
+        f"\nCards with secondary_subject (wordplay+domain): {secondary_count:,} ({100.0 * secondary_count / total:.1f}%)"
     )
 
     print("\nTop subjects by recency-weighted frequency:")
@@ -1055,7 +1064,9 @@ def main() -> None:
 
     if args.clean_export:
         if not args.source and not args.live_db:
-            parser.error("source is required when using --clean-export unless --live-db is set")
+            parser.error(
+                "source is required when using --clean-export unless --live-db is set"
+            )
     elif not args.analysis_only and not args.output and not args.live_db:
         parser.error("output is required unless --live-db or --analysis-only is set")
     if not args.clean_export and not args.source and not args.live_db:

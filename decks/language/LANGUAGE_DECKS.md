@@ -4,7 +4,7 @@ Automation for the three language decks in the live Anki collection: **Français
 
 > **Status: design approved 2026-09-25; docs and the repo restructure are done, no language code written yet.** This document is the spec and the decision log. It is updated as the design changes. Roadmap at the bottom.
 
-Related: [`docs/ANKI_NOTES.md`](../../docs/ANKI_NOTES.md) (collection and AnkiConnect facts) · [`decks/trivia/`](../trivia/README.md) (Jeopardy and US Presidents, a different family with its own pipeline).
+Related: [`docs/ANKI_NOTES.md`](../../docs/ANKI_NOTES.md) (collection and AnkiConnect facts) · [`decks/trivia/`](../trivia/TRIVIA_DECKS.md) (Jeopardy and US Presidents, a different family with its own pipeline).
 
 ---
 

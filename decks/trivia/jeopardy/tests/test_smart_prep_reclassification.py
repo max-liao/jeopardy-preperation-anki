@@ -387,7 +387,10 @@ class RefreshReclassificationTests(unittest.TestCase):
                 self.assertEqual(shown[index], unlabeled[index])
 
     def test_a_category_listed_in_no_card_subjects_keeps_showing_other(self) -> None:
-        with mock.patch("decks.trivia.jeopardy.smart_prep.NO_CARD_SUBJECTS", frozenset({MIXED_CATEGORY})):
+        with mock.patch(
+            "decks.trivia.jeopardy.smart_prep.NO_CARD_SUBJECTS",
+            frozenset({MIXED_CATEGORY}),
+        ):
             self.refresh()
         for note_id in self.note_ids[MIXED_CATEGORY]:
             with self.subTest(note_id=note_id):

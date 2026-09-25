@@ -191,7 +191,8 @@ class LabelCardTests(unittest.TestCase):
         self.assertIn(POP_CULTURE, CARD_SUBJECT_NEVER_SHOWN)
         self.assertIsNone(self.label(POP_CLUE, "cher"))
         with mock.patch(
-            "decks.trivia.jeopardy.jeopardy_card_helpers.CARD_SUBJECT_NEVER_SHOWN", frozenset[str]()
+            "decks.trivia.jeopardy.jeopardy_card_helpers.CARD_SUBJECT_NEVER_SHOWN",
+            frozenset[str](),
         ):
             self.assertEqual(self.label(POP_CLUE, "cher"), POP_CULTURE)
 

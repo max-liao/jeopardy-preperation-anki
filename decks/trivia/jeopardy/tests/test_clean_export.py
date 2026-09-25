@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from decks.trivia.jeopardy.jeopardy_db_helpers import connect_anki, reset_review_progress
+from decks.trivia.jeopardy.jeopardy_db_helpers import reset_review_progress
 
 
 class ResetReviewProgressTests(unittest.TestCase):
@@ -52,7 +52,9 @@ class ResetReviewProgressTests(unittest.TestCase):
                 "SELECT queue, type, due, ivl, factor, reps, lapses, left, odue, odid FROM cards WHERE id = 1"
             ).fetchone()
             self.assertEqual(card, (0, 0, 1, 0, 2500, 0, 0, 0, 0, 0))
-            self.assertEqual(conn.execute("SELECT COUNT(*) FROM revlog").fetchone()[0], 0)
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) FROM revlog").fetchone()[0], 0
+            )
             conn.close()
 
 

@@ -372,7 +372,7 @@ def print_report(reasons: dict[int, str], total_cards: int) -> None:
         print(f"  {reason:<14}{counts[reason]:>10,}")
     print("  " + "-" * 24)
     print(
-        f"  {'TOTAL':<14}{len(reasons):>10,}  ({len(reasons)/total_cards:.1%} of deck)"
+        f"  {'TOTAL':<14}{len(reasons):>10,}  ({len(reasons) / total_cards:.1%} of deck)"
     )
     print(f"\n  active deck after archiving: {remaining:,}")
     print()

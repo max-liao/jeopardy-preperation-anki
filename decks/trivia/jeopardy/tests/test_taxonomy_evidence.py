@@ -33,7 +33,11 @@ from decks.trivia.jeopardy.jeopardy_taxonomy_helpers import (
     reclassify_by_evidence,
     source_subject,
 )
-from decks.trivia.jeopardy.jeopardy_types import EvidenceReclassification, SubjectEvidence, TaxonomyEntry
+from decks.trivia.jeopardy.jeopardy_types import (
+    EvidenceReclassification,
+    SubjectEvidence,
+    TaxonomyEntry,
+)
 
 LITERATURE: TaxonomyEntry = ("Literature", "Novels", "")
 FILM: TaxonomyEntry = ("Film & TV", "Movies", "")
