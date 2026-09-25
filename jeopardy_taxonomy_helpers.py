@@ -46,6 +46,7 @@ from jeopardy_consts import (
 )
 from jeopardy_db_helpers import strip_html_media
 from jeopardy_types import (
+    CardText,
     ClueVocabulary,
     EvidenceReclassification,
     SubjectEvidence,
@@ -56,6 +57,27 @@ from jeopardy_types import (
 AnswerVotes = Mapping[str, Mapping[str, int]]
 
 _CLUE_WORD_RE = re.compile(EVIDENCE_CLUE_WORD_PATTERN)
+
+
+def group_cards_by_category(
+    cards: Iterable[CardText],
+) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+    """Group the cards' answers and clues under their on-air category.
+
+    Args:
+        cards: every Jeopardy card in the deck
+
+    Returns:
+        (category -> normalized answer key of each card, skipping cards whose
+        answer is unusable; category -> clue text of each card)
+    """
+    answers: defaultdict[str, list[str]] = defaultdict(list)
+    clues: defaultdict[str, list[str]] = defaultdict(list)
+    for card in cards:
+        clues[card.category].append(card.clue)
+        if card.answer_key:
+            answers[card.category].append(card.answer_key)
+    return dict(answers), dict(clues)
 
 
 def build_answer_votes(
@@ -264,6 +286,21 @@ def clue_subject(clues: Iterable[str], vocabulary: ClueVocabulary) -> str | None
     )
 
 
+def category_subject(category: str, taxonomy: Mapping[str, TaxonomyEntry]) -> str:
+    """The subject the name-only pass gave a category ("Other" if it gave none).
+
+    Args:
+        category: normalized (uppercased) on-air category
+        taxonomy: category -> (subject, sub_category, secondary_subject)
+
+    Returns:
+        The category's subject; a category missing from the taxonomy counts as
+        "Other"
+    """
+    entry = taxonomy.get(category)
+    return SUBJECT_OTHER if entry is None else entry[0]
+
+
 def source_subject(
     category: str,
     taxonomy: Mapping[str, TaxonomyEntry],
@@ -282,8 +319,7 @@ def source_subject(
     """
     if category in protected:
         return None
-    entry = taxonomy.get(category)
-    subject = SUBJECT_OTHER if entry is None else entry[0]
+    subject = category_subject(category, taxonomy)
     return subject if subject in EVIDENCE_MIN_MEAN_SHARE_BY_SOURCE else None
 
 

@@ -373,3 +373,39 @@ EVIDENCE_REPORT_COLUMNS: Final[tuple[str, ...]] = (
     "runner_up",
     "runner_up_share",
 )
+
+# --- Per-card subjects -----------------------------------------------------
+# The rules above judge a whole CATEGORY, so a grab-bag ("DID I MISS ANYTHING?",
+# "POTPOURRI") whose clues test different things keeps showing "Other" even when
+# every single card has an obvious subject. jeopardy_card_helpers.py judges one CARD
+# from its own clue and answer. The clue model's log-likelihood and the answer's
+# vote share are added as a product of experts:
+#   score(subject) = clue log-likelihood + WEIGHT * ln(answer share + SMOOTHING)
+# The weight lets one answer count for about as much as a clue's ~20 words, whose
+# individual votes the naive Bayes model overstates. The smoothing keeps an answer
+# that has no votes for a subject from vetoing it outright.
+CARD_SUBJECT_ANSWER_WEIGHT: Final[float] = 4.0
+CARD_SUBJECT_ANSWER_SMOOTHING: Final[float] = 0.2
+# Which category labels get per-card subjects, and how far (in nats of score) the
+# best subject must lead the runner-up to be shown. Only "Other" qualifies: it means
+# the category names no subject. A real subject is the category's own call and
+# stays. "Wordplay & Language" is deliberately absent: about half its cards really
+# are language items, so a content subject on those is wrong or hides the format
+# (see JEOPARDY_PREP_DECK.md). Like EVIDENCE_MIN_MEAN_SHARE_BY_SOURCE, a label
+# missing from this table is never labeled card by card.
+CARD_SUBJECT_MIN_GAP_BY_SOURCE: Final[dict[str, float]] = {SUBJECT_OTHER: 5.0}
+# Subjects a card is never shown with, even when they win. Their answers are asked
+# in every kind of category (they never win a category vote either) and their
+# clues share vocabulary with Film & TV, Music and History, so the evidence cannot
+# vouch for them: read blind, only 47% of the Pop Culture and 19% of the People
+# proposals were exactly right, against 81-98% for every other subject.
+CARD_SUBJECT_NEVER_SHOWN: Final[frozenset[str]] = frozenset({"Pop Culture", "People"})
+# Header of the per-card list written by `smart_prep.py --card-report PATH`.
+CARD_REPORT_COLUMNS: Final[tuple[str, ...]] = (
+    "note_id",
+    "category",
+    "from",
+    "to",
+    "gap",
+    "runner_up",
+)

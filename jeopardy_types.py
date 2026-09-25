@@ -53,6 +53,26 @@ class EvidenceReclassification(TypedDict):
     runner_up_share: float  # its mean share, 0.0-1.0
 
 
+class CardText(NamedTuple):
+    """What the evidence rules read from one Jeopardy note."""
+
+    note_id: int
+    category: str  # normalized (uppercased) on-air category
+    clue: str  # the clue shown, as stored (may hold HTML and media references)
+    answer_key: str  # normalized answer key; "" when the answer is unusable
+
+
+class CardSubject(TypedDict):
+    """A card shown under a subject of its own, whatever its category is."""
+
+    note_id: int
+    category: str  # normalized (uppercased) on-air category
+    source_subject: str  # the category's subject: "Other"
+    subject: str  # the subject the card's own clue and answer point to
+    gap: float  # the subject's lead over the runner-up, in nats of score
+    runner_up: str  # the next-best subject
+
+
 class SubjectEvidence(NamedTuple):
     """What a category's answers say: the best subject and its runner-up."""
 

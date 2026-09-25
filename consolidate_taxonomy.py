@@ -380,6 +380,16 @@ MANUAL_OVERRIDES: Final[dict[str, tuple[str, str]]] = {
 }
 
 # ---------------------------------------------------------------------------
+# Categories whose cards keep their category's subject instead of each getting one
+# of its own (jeopardy_card_helpers.py). This is an opt-out, not a pin: a pin in
+# MANUAL_OVERRIDES keeps the CATEGORY's label but still lets each card show its own
+# subject, which is how POTPOURRI's cards get theirs. List a category here after
+# reading its per-card subjects (`smart_prep.py --card-report`) and rejecting them.
+# ---------------------------------------------------------------------------
+
+NO_CARD_SUBJECTS: Final[frozenset[str]] = frozenset()
+
+# ---------------------------------------------------------------------------
 # Canonical sub-category names that should be unified across subjects
 # ---------------------------------------------------------------------------
 

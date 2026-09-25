@@ -104,15 +104,16 @@ Jeopardy Smart Prep::Archive   dead cards — out of rotation, never deleted
 | ------------------------------ | ------------------------------------------------------------------------------------------------------------ |
 | `update_collection.py`         | Merges jwolle1 TSV clues (post-2019) into .colpkg                                                            |
 | `classify_categories.py`       | LLM-classifies on-air categories → `category_taxonomy.json`                                                  |
-| `consolidate_taxonomy.py`      | Post-processes taxonomy: merges synonyms, strips temporal noise, injects manual overrides                    |
+| `consolidate_taxonomy.py`      | Post-processes taxonomy: merges synonyms, strips temporal noise, injects manual overrides; `NO_CARD_SUBJECTS`  |
 | `consolidate_decks.py`         | One-time merge of the legacy `Jeopardy` deck into `Jeopardy Smart Prep` (idempotent)                         |
 | `add_subject_to_badge.py`      | One-time: adds the subject label back onto the frequency badge (idempotent)                                  |
 | `restore_category_front.py`    | One-time: restores `{{Category}}` to the card front, off the back (idempotent)                               |
 | `archive_dead_cards.py`        | Moves dead cards to the Archive subdeck; `--restore` reverses it                                             |
 | `smart_prep.py`                | Blended frequency scoring + field/template + tag writes                                                      |
 | `jeopardy_taxonomy_helpers.py` | Evidence-based reclassification of `Other` and `Wordplay & Language` categories (see _Taxonomy Pipeline_)    |
+| `jeopardy_card_helpers.py`     | Per-card subjects for cards whose category is `Other` (see _Per-card subjects_)                              |
 | `verify_refresh.py`            | `snapshot` / `compare` fingerprint of the review log, cards and note content around a refresh                |
-| `tests/`                       | `python -m pytest tests -q` — reclassification rule, end-to-end refresh, the verify guard                    |
+| `tests/`                       | `python -m pytest tests -q` — reclassification rule, per-card subjects, end-to-end refresh, the verify guard |
 | `study_optimizer.py`           | Ease tuning + perf tags + day-category grouped/value-sorted new-card `due` order                             |
 | `configure_deck_options.py`    | One-time: new cards before reviews; `--preset` scopes it (see _Study Queue Ordering_)                        |
 | `jeopardy_consts.py`           | All constants: field indices, tier thresholds, recency weights, subjects                                     |
@@ -328,6 +329,53 @@ The two wrong re-labels, `"CEL"EBRITY WORDS` (→ Science; really word play) and
 
 **Preview before writing:** `python smart_prep.py --live-db "$DB" --analysis-only --evidence-report /tmp/jeopardy-moves.tsv` logs `Evidence reclassification: 2417 categories (13,023 cards)`, the 15 most common source → subject pairs and the 15 largest moves, and writes every move (category, cards, from, to, share, runner-up, runner-up share) to the TSV.
 
+### Per-card subjects (cards of `Other` categories)
+
+> **Status (2026-09-25): implemented and rehearsed on a copy, not yet run on the live collection.** It waits for the approval page (see the last paragraph). Nothing below has changed a score or a tier.
+
+**The problem.** The category rules judge a whole category, so a category whose clues test different things stays `Other`, however plain each card is. The card that started this is `DID I MISS ANYTHING?` ($800, "George Loveless was sent … to this distant place in 1834" → Australia). It is not a grab-bag: five clues, all from one 2021 board, about people who came home after years away, and the clue model calls every one History (about 31 log-units clear over the whole category). The category rule declined it for two reasons the doc's rule cannot avoid: the answers are places (Philippines, New Guinea, Australia), so the mean answer share is Geography 0.34 against History 0.24 (the bar is 0.45 with a 0.20 margin), and the rule needs the clue model to agree with the answers. Read blind, **41% of the categories still in `Other` are really about one subject, 9% are language content and 51% mix subjects; 77% of `Other` cards have a clear content subject when read one at a time.** Grab-bags cannot be fixed per category, so this layer judges a card.
+
+**The rule** (`jeopardy_card_helpers.py`, run by `smart_prep.py` right after the category rules, on the refined taxonomy, so the categories they moved vote and teach the clue model; about 13 s). It applies to a card whose category is `Other`: that includes a category missing from the taxonomy and the grab-bags pinned as `Other` in `MANUAL_OVERRIDES` (POTPOURRI, HODGEPODGE… are the point of the layer). It never touches `Wordplay & Language` or a real subject.
+
+1. **Score the 15 content subjects.** `score(subject) = clue log-likelihood + 4 × ln(answer share + 0.2)`. The clue term is the same naive-Bayes clue model as the category rule, applied to this one clue. The answer share is the share of the classified categories containing the answer that belong to the subject (`build_answer_votes`, at least 2 votes, else no evidence). The 4 lets one answer count for about as much as ~20 clue words, whose individual votes naive Bayes overstates; the 0.2 stops an answer with no votes for a subject from vetoing it.
+2. **Show the winner** if it leads the runner-up by **at least 5** (`CARD_SUBJECT_MIN_GAP_BY_SOURCE`), is not **People** or **Pop Culture** (`CARD_SUBJECT_NEVER_SHOWN`) and the clue's words do not read as Wordplay & Language more than as the winner.
+
+The Loveless card: the answer votes Geography 39%, History 8%; the clue alone puts History 5.1 ahead of Literature; together History leads Literature by 5.5 and Geography by 5.9, so it shows History. The answer alone would have said Geography. Result on the current deck: **9,473 cards (28.4% of `Other`) in 4,129 categories.** In the categories that really are about one subject, 33% of the cards get a subject and 94% of those match the category.
+
+**What the card shows.** The per-card subject replaces the category's on the badge, in "Frequently asked theme", in the `subject:` tag and in the "Appeared N times" count (each card counts under the subject it shows). The `subcat:` tag stays the category's (`Unclassified`), which is also how to find these cards: `tag:subject:History tag:subcat:Unclassified`. A card without a confident subject still shows `Other`. The category's label in the taxonomy never changes.
+
+**Scoring is deliberately unchanged.** `score_notes()` still sees the category's subject, so a per-card subject moves no score and no tier: **0 of 409,382 cards** (rehearsed: the 2026-09-25 tiers reproduce exactly before and after). Other treatments were simulated with the real scoring code and are **not** made; each would need approval:
+
+| Cards labeled (gap ≥) | Subject credit only: cards that change tier | Full credit, as a category move: cards that change tier |
+| --------------------- | ------------------------------------------: | ------------------------------------------------------: |
+| 5 (9,473)             |                              13,081 (3.20%) |                                          27,641 (6.75%) |
+| 6 (7,874)             |                              11,615 (2.84%) |                                          23,617 (5.77%) |
+| 7 (6,417)             |                              10,222 (2.50%) |                                          20,096 (4.91%) |
+| 8 (5,175)             |                               8,973 (2.19%) |                                          16,941 (4.14%) |
+
+Most of the moved tiers belong to _other_ cards (8,036 of the 13,081 at gap 5), because a tier is a percentile and labeled cards rising push others down.
+
+**Calibration (2026-09-25).** Every proposal was labeled by a reader who could not see it: 12,271 cards (every per-card candidate at gap ≥ 4 and every card of the category-move candidates below) in 25 batches read by independent sub-agents, with 189 control cards from my own blind hand labels mixed in. On the controls the readers pick my best subject 86% of the time and one of my two subjects 97% of the time (over the 650 cards both of us labeled: 90% and 97%). _Exactly right_ = the reader's best subject; _right or close_ also counts their second choice.
+
+| Gap        |  Cards | Exactly right | Right or close | Cards at or above | Exactly right | Right or close |
+| ---------- | -----: | ------------: | -------------: | ----------------: | ------------: | -------------: |
+| 5–6        |  1,610 |         74.5% |          88.8% |             9,473 |         87.0% |          95.2% |
+| 6–7        |  1,458 |         80.9% |          91.8% |             7,863 |         89.5% |          96.6% |
+| 7–8        |  1,238 |         84.9% |          95.2% |             6,405 |         91.5% |          97.6% |
+| 8 and up   |  5,167 |         93.0% |          98.2% |             5,167 |         93.0% |          98.2% |
+
+The gap is the only signal that separated right from wrong inside a band: whether the two experts agree, whether the answer had votes and how long the clue is made a point or two of difference at most. By subject (gap ≥ 5): Geography 1,857 proposals (80.8% exactly right, 93.4% right or close), Science 1,648 (83.1%, 92.2%), History 1,472 (88.2%, 95.6%), Literature 913 (91.1%, 97.5%), Film & TV 822 (87.6%, 94.3%), Music 725 (94.1%, 98.2%), Food & Drink 656 (82.5%, 96.0%), Sports 375 (96.8%, 98.9%), Nature & Animals 283 (96.1%, 99.6%), Religion & Mythology 230 (96.5%, 99.6%), Art 195 (82.6%, 89.2%), Politics & Government 171 (88.3%, 99.4%), Business & Economics 126 (97.6%, 100%). **Pop Culture (110 proposals: 47.3% / 66.4%) and People (32: 18.8% / 56.2%) are never shown**: their answers are asked in every kind of category, so the votes cannot vouch for them. Of the 503 proposals at gap ≥ 5 that were plainly wrong, the reader found a different content subject for 341, no single subject for 105 and a language item for 57. Cutting the cutoff to 5 is the trade-off: the 5–6 band alone is 74.5% / 88.8% (the Loveless card, at 5.5, is in it), where the category rule's own bands were never accepted below about 88% / 93%. Raising it to 7 gives up 3,068 cards to gain 4.5 points of exactness.
+
+**Wordplay categories are excluded, deliberately.** Blind sample of 100 Wordplay categories (462 cards): about 29% are single-subject content, 34% language content, 37% mixed. The same rule at gap ≥ 5 labels 16.5% of the cards but is exactly right only 71.8% of the time (89.2% right or close), and about one in six of those is a language item that a content subject misfiles. At gap ≥ 8 it is right or close on every card, but labels only 6.5% (37 cards in the sample). Half the cards in Wordplay categories are language items, and `Wordplay & Language` is the right theme for them. To try it anyway, add `"Wordplay & Language": 8.0` to `CARD_SUBJECT_MIN_GAP_BY_SOURCE`.
+
+**Category-level recall, measured (leave-one-category-out over 31,247 labeled categories, plus blind samples and reading every candidate).** Today's rule: recall 19.7%, agreement with the LLM label 94.4% (per-subject recall matches the table above). Relaxing the margin from 0.20 to 0.10 recovers 0.1 point. Bar 0.45 → 0.40: recall 24.0%, agreement 90.8%, and the extra moves agree only 77% of the time; read blind, the 182 categories in the 0.40–0.45 band are 154 fit, 21 close, 7 wrong. Accepting the clue model's second choice: recall 20.4%, the extra moves agree 63%. Dropping the clue check: recall 22.7%, extra moves agree 73%. A second pass (moved categories also vote): recall 22.8%, extra moves agree 83%; read blind, the 116 new categories are 106 fit, 4 close, 6 wrong (`Other` only: passes 3 and 4 add 37 and 9 more). Consensus of card labels, a clue-led route and a mean product-of-experts score reached 15–40% recall at 80–92% card precision. **None is worth making.** The cards of those candidate categories are already labeled card by card: 890 of the 1,587 get a subject from the layer above at 99.8% right or close, so a category move would add labels mainly for the ~700 weakest cards, about 80% right, and it would move tiers. A name-only re-classification of the `Other` names is no better: guessing from the name alone (recorded before reading any clue, on 109 names) names the right subject for 57% of the single-subject categories, but it also names a subject for mixed categories, so only 66% of the subjects it names are right.
+
+**Known limits.** About a third of the cards in a single-subject category and about 72% of `Other` cards overall get no subject: there is not enough evidence in the clue or the answer, so they keep `Other`. Ambiguous subjects (a president as History or Politics, a celebrity as Film & TV or Pop Culture) are the usual "close" cases. An image-only clue has no words, so only a unanimous answer can place it. A category with a sub-category the LLM did place under `Other` (`Annual Events`, `Calendar`) is labeled card by card like the rest. `Art` (82.6% / 89.2%) and `Science` (83.1% / 92.2%) are the weakest subjects that are shown.
+
+**Tunables** are the `CARD_SUBJECT_*` constants in `jeopardy_consts.py`: `ANSWER_WEIGHT` (4.0), `ANSWER_SMOOTHING` (0.2), `MIN_GAP_BY_SOURCE` (`Other`: 5.0; a label missing from it is never labeled card by card) and `NEVER_SHOWN` (People, Pop Culture). **Opting a category out:** add it to `NO_CARD_SUBJECTS` in `consolidate_taxonomy.py`; a pin in `MANUAL_OVERRIDES` keeps the _category_ label but still lets its cards show their own subject. **Preview before writing:** `python smart_prep.py --live-db "$DB" --analysis-only --card-report /tmp/jeopardy-cards.tsv` writes every card (note id, category, from, to, gap, runner-up) and logs the counts by subject.
+
+**Approval.** The full list, with every reader verdict and a saved Keep list, is on the approval page published 2026-09-25 (an Artifact). A dropped category goes into `NO_CARD_SUBJECTS`; the chosen cutoff goes into `CARD_SUBJECT_MIN_GAP_BY_SOURCE`.
+
 ---
 
 ## Anki Field Map
@@ -362,7 +410,7 @@ After `smart_prep.py` runs, field 14 (`Frequency Score`) is added with the HTML 
 | Tag              | Example               | Meaning                                                        |
 | ---------------- | --------------------- | -------------------------------------------------------------- |
 | `freq:{tier}`    | `freq:high`           | Blended frequency tier                                         |
-| `subject:{name}` | `subject:Literature`  | Primary taxonomy subject                                       |
+| `subject:{name}` | `subject:Literature`  | Primary taxonomy subject; a card's own subject if it has one   |
 | `subcat:{name}`  | `subcat:Shakespeare`  | Normalized sub-category                                        |
 | `subcat2:{name}` | `subcat2:Science`     | Secondary domain (wordplay only)                               |
 | `era:{era}`      | `era:recent`          | Air date bucket (recent=2020+, modern=2010–2019, old=pre-2010) |
@@ -503,6 +551,8 @@ Geography is the clear strength (Cities 94.2%, Countries 87.5%, Rivers & Lakes 8
   > ⚠️ **Discrepancy found 2026-09-24: they _do_ earn topic credit today.** `score_notes()` zeroes the sub-category component only when the label is `"Miscellaneous"` (`_DEFAULT_SUBCAT`), but `consolidate_taxonomy.py` renames every catch-all to `"Unclassified"`, so the zeroing matches 1 card instead of ~30,000. The `unclassified` sub-category is therefore the **second-largest bucket in the deck** (16,645 recency-weighted vs 1,905 for the third), and every card in it gets a near-top sub-category percentile (the `A NOVEL PASSAGE` cards, for one, showed 88–93 while `Other`). Measured on the current deck after the Literature fallback (29,858 cards, 7.3%): mean priority **53.1**, with 8,817 (30%) in `freq:high`. If the bucket earned no credit, as the code comment at `score_notes()` intends, those figures would be **12.8** and **22 (0%)**, and **73,667 cards (18.0% of the deck) would change tier** once everything is re-ranked. The fix is one line (compare against both labels), but it reorders the new-card queue, so it was deliberately **not** made alongside the classification change — decide first whether you want it.
 
   **Fixed 2026-09-25** (with the evidence reclassification, at the user's request): `score_notes()` now zeroes both labels (`_NO_TOPIC_SUBCATS`). The bucket is 26,806 cards (6.5%); their mean score fell from 52.9 to 12.3 and `freq:high` from 7,720 to 19. 66,372 cards (16.2%) changed tier on top of the reclassification: 24,724 `Unclassified` cards moved down, and 41,166 other cards moved up into the room they left. Against the previous live state, the whole refresh changed 67,303 tiers (16.4%).
+
+- [ ] **Label the rest of `Other` with an LLM.** About 23,900 `Other` cards still show `Other` after the per-card rule, although (blind hand labels) about 77% of `Other` cards have a clear content subject. Independent readers labeling clues one by one agreed with my labels 86–90% exactly (97% within two subjects), so LLM labels for these cards would be about as good as the category taxonomy's. It is 80 batches of 300 clues in the style of `classify_categories.py`. The labels would have to be stored (a table keyed by note id, applied like the per-card layer) and refreshed for each new season, which turns a computed rule into a maintained table. Not done.
 
 - [ ] **Match classifier output on a normalized name** — `classify_batch()` looks each result up by exact name and silently files any miss as `Other / Miscellaneous` (see _Why `CAPITAL "C"` showed Other_). Strip the TSV's `\"` escape or compare normalized keys, log every item the model skips, then re-classify the 827 backslash categories.
 

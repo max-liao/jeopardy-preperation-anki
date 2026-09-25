@@ -16,7 +16,8 @@ category taxonomy (see classify_categories.py), this:
 Usage:
   python smart_prep.py SOURCE.colpkg OUTPUT.apkg
       [--taxonomy category_taxonomy.json] [--analysis-only]
-      [--evidence-report moves.tsv] [--deck-name "Jeopardy Smart Prep"]
+      [--evidence-report moves.tsv] [--card-report cards.tsv]
+      [--deck-name "Jeopardy Smart Prep"]
 """
 
 import argparse
@@ -31,16 +32,18 @@ import sys
 import tempfile
 import time
 from collections import Counter, defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Literal
 
-from consolidate_taxonomy import MANUAL_OVERRIDES
+from consolidate_taxonomy import MANUAL_OVERRIDES, NO_CARD_SUBJECTS
+from jeopardy_card_helpers import label_cards
 from jeopardy_consts import (
     BADGE_STYLE_BLOCK,
     BADGE_STYLE_MARKER,
     CARD_AGE_DEFAULT,
     CARD_AGE_WEIGHTS,
+    CARD_REPORT_COLUMNS,
     ERA_MODERN_START,
     ERA_RECENT_START,
     EVIDENCE_REPORT_COLUMNS,
@@ -101,8 +104,13 @@ from jeopardy_db_helpers import (
     reset_review_progress,
     strip_foreign_decks,
 )
-from jeopardy_taxonomy_helpers import reclassify_by_evidence
-from jeopardy_types import EvidenceReclassification
+from jeopardy_taxonomy_helpers import (
+    build_answer_votes,
+    build_clue_vocabulary,
+    group_cards_by_category,
+    reclassify_by_evidence,
+)
+from jeopardy_types import CardSubject, CardText, EvidenceReclassification
 
 logging.basicConfig(
     level=logging.INFO,
@@ -269,33 +277,32 @@ def load_taxonomy(path: Path) -> dict[str, tuple[str, str, str]]:
     return out
 
 
-def read_category_cards(
-    conn: sqlite3.Connection,
-) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
-    """Group every Jeopardy note's answer and clue under its on-air category.
+def read_cards(conn: sqlite3.Connection) -> list[CardText]:
+    """Read every Jeopardy note's category, clue and normalized answer.
 
     Args:
         conn: SQLite connection
 
     Returns:
-        (uppercased category -> normalized answer key of each of its notes,
-        skipping notes whose answer is empty or punctuation-only;
-        uppercased category -> clue text of each of its notes)
+        One CardText per note (the answer key is "" when it is empty or
+        punctuation-only)
     """
     cursor = conn.cursor()
-    cursor.execute("SELECT flds FROM notes WHERE mid = ?", (JEOPARDY_NOTETYPE_ID,))
-    answers_by_category: dict[str, list[str]] = defaultdict(list)
-    clues_by_category: dict[str, list[str]] = defaultdict(list)
-    for (flds,) in cursor:
+    cursor.execute("SELECT id, flds FROM notes WHERE mid = ?", (JEOPARDY_NOTETYPE_ID,))
+    cards: list[CardText] = []
+    for note_id, flds in cursor:
         parts = flds.split("\x1f")
         if len(parts) < TOTAL_FIELDS:
             continue
-        category = parts[FIELD_CATEGORY].strip().upper()
-        clues_by_category[category].append(parts[FIELD_QUESTION])
-        answer_key = normalize_answer(parts[FIELD_ANSWER].strip())
-        if answer_key:
-            answers_by_category[category].append(answer_key)
-    return dict(answers_by_category), dict(clues_by_category)
+        cards.append(
+            CardText(
+                note_id=note_id,
+                category=parts[FIELD_CATEGORY].strip().upper(),
+                clue=parts[FIELD_QUESTION],
+                answer_key=normalize_answer(parts[FIELD_ANSWER].strip()),
+            )
+        )
+    return cards
 
 
 def log_evidence_reclassifications(moved: list[EvidenceReclassification]) -> None:
@@ -338,7 +345,7 @@ def write_evidence_report(path: Path, moved: list[EvidenceReclassification]) -> 
 
 
 def refine_taxonomy_with_evidence(
-    conn: sqlite3.Connection,
+    cards: list[CardText],
     taxonomy: dict[str, tuple[str, str, str]],
     evidence_report: Path | None = None,
 ) -> dict[str, tuple[str, str, str]]:
@@ -349,14 +356,14 @@ def refine_taxonomy_with_evidence(
     Manual overrides are never moved.
 
     Args:
-        conn: SQLite connection
+        cards: every Jeopardy card in the deck
         taxonomy: category -> (subject, sub_category, secondary_subject)
         evidence_report: if set, every move is also written here as a TSV
 
     Returns:
         A refined copy of the taxonomy (the input is not mutated)
     """
-    answers, clues = read_category_cards(conn)
+    answers, clues = group_cards_by_category(cards)
     refined, moved = reclassify_by_evidence(
         taxonomy, answers, clues, MANUAL_OVERRIDES.keys()
     )
@@ -364,6 +371,71 @@ def refine_taxonomy_with_evidence(
     if evidence_report is not None:
         write_evidence_report(evidence_report, moved)
     return refined
+
+
+def log_card_subjects(labeled: list[CardSubject]) -> None:
+    """Summarize the per-card subjects by category and by subject."""
+    categories = len({item["category"] for item in labeled})
+    logger.info(f"Per-card subjects: {len(labeled):,} cards in {categories} categories")
+    by_move = Counter((item["source_subject"], item["subject"]) for item in labeled)
+    for (source, subject), count in by_move.most_common(EVIDENCE_REPORT_TOP_N):
+        logger.info(f"  {count:>6,} cards  {source} -> {subject}")
+    if len(by_move) > EVIDENCE_REPORT_TOP_N:
+        logger.info(f"  ... and {len(by_move) - EVIDENCE_REPORT_TOP_N} more pairs")
+
+
+def write_card_report(path: Path, labeled: list[CardSubject]) -> None:
+    """Write every per-card subject as a TSV, for review before a live refresh."""
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f, delimiter="\t", lineterminator="\n")
+        writer.writerow(CARD_REPORT_COLUMNS)
+        for item in labeled:
+            writer.writerow(
+                (
+                    item["note_id"],
+                    item["category"],
+                    item["source_subject"],
+                    item["subject"],
+                    f"{item['gap']:.2f}",
+                    item["runner_up"],
+                )
+            )
+    logger.info(f"Wrote {len(labeled)} per-card subjects to {path}")
+
+
+def label_cards_by_evidence(
+    cards: list[CardText],
+    taxonomy: dict[str, tuple[str, str, str]],
+    card_report: Path | None = None,
+) -> dict[int, str]:
+    """Give each card of a subject-less category the subject of its own evidence.
+
+    Runs after the category rules, on the refined taxonomy, so the categories they
+    moved vote and teach the clue model. Only a card's badge, theme text and
+    subject tag change: scoring still sees its category's subject. Categories
+    pinned as "Other" in MANUAL_OVERRIDES (the grab-bags) are labeled too;
+    NO_CARD_SUBJECTS opts a category out.
+
+    Args:
+        cards: every Jeopardy card in the deck
+        taxonomy: the taxonomy after `refine_taxonomy_with_evidence`
+        card_report: if set, every label is also written here as a TSV
+
+    Returns:
+        note id -> subject, for the cards that got one
+    """
+    answers, clues = group_cards_by_category(cards)
+    labeled = label_cards(
+        cards,
+        taxonomy,
+        NO_CARD_SUBJECTS,
+        build_answer_votes(answers, taxonomy),
+        build_clue_vocabulary(clues, taxonomy),
+    )
+    log_card_subjects(labeled)
+    if card_report is not None:
+        write_card_report(card_report, labeled)
+    return {item["note_id"]: item["subject"] for item in labeled}
 
 
 def read_note_meta(
@@ -726,14 +798,19 @@ def build_frequency_details(
 
 
 def build_recent_subject_counts(
-    meta: dict[int, NoteMeta], latest_year: int
+    meta: dict[int, NoteMeta], latest_year: int, card_subjects: Mapping[int, str]
 ) -> tuple[dict[str, int], int]:
-    """Count subject cards once for the recent display window."""
+    """Count subject cards once for the recent display window.
+
+    A card counts under the subject it is shown with: its own if it has one
+    (see `label_cards_by_evidence`), else its category's.
+    """
     start_year = latest_year - THEME_WINDOW_YEARS + 1
     counts: dict[str, int] = defaultdict(int)
-    for _answer, _subcat, subject, _label, _secondary, year, _stake in meta.values():
+    for note_id, m in meta.items():
+        _answer, _subcat, subject, _label, _secondary, year, _stake = m
         if start_year <= year <= latest_year:
-            counts[subject] += 1
+            counts[card_subjects.get(note_id, subject)] += 1
     return dict(counts), start_year
 
 
@@ -746,6 +823,7 @@ def apply_scores_and_tags(
     latest_year: int,
     recent_subject_counts: dict[str, int],
     start_year: int,
+    card_subjects: Mapping[int, str],
 ) -> int:
     """Write the badge field + freq/subject/subcat/era tags onto every note.
 
@@ -755,6 +833,9 @@ def apply_scores_and_tags(
         scored: note_id -> (score, tier)
         score_ord: Note-field ordinal for the score badge
         details_ord: Note-field ordinal for the back-of-card details
+        card_subjects: note id -> the subject a card is shown with instead of its
+            category's (badge, theme text and subject tag; the sub-category tag
+            stays its category's)
 
     Returns:
         Number of notes updated
@@ -768,7 +849,10 @@ def apply_scores_and_tags(
         if note_id not in scored:
             continue
         score, tier = scored[note_id]
-        _ak, _ck, subject, subcat_label, secondary_subject, year, _stake = meta[note_id]
+        _ak, _ck, category_subject, subcat_label, secondary_subject, year, _stake = (
+            meta[note_id]
+        )
+        subject = card_subjects.get(note_id, category_subject)
         badge = badge_html(score, tier, subject)
         details = build_frequency_details(
             subject, score, recent_subject_counts, start_year, latest_year
@@ -845,9 +929,16 @@ def print_report(
 
 
 def compute_scores(
-    conn: sqlite3.Connection, taxonomy_path: Path, evidence_report: Path | None = None
+    conn: sqlite3.Connection,
+    taxonomy_path: Path,
+    evidence_report: Path | None = None,
+    card_report: Path | None = None,
 ) -> tuple[
-    dict[int, NoteMeta], dict[int, tuple[int, Tier]], dict[str, float], dict[str, float]
+    dict[int, NoteMeta],
+    dict[int, tuple[int, Tier]],
+    dict[str, float],
+    dict[str, float],
+    dict[int, str],
 ]:
     """Read notes from `conn` and score every one of them.
 
@@ -855,13 +946,18 @@ def compute_scores(
         conn: SQLite connection to a collection holding the Jeopardy notes
         taxonomy_path: Path to category_taxonomy.json
         evidence_report: if set, the evidence reclassifications are written here
+        card_report: if set, the per-card subjects are written here
 
     Returns:
-        (meta, scored, subject_score, secondary_subject_score)
+        (meta, scored, subject_score, secondary_subject_score, card_subjects).
+        Scoring uses each category's subject; `card_subjects` (note id -> the
+        subject a card is shown with) only changes what is displayed.
     """
     taxonomy = load_taxonomy(taxonomy_path)
     logger.info(f"Loaded taxonomy with {len(taxonomy)} categories")
-    taxonomy = refine_taxonomy_with_evidence(conn, taxonomy, evidence_report)
+    cards = read_cards(conn)
+    taxonomy = refine_taxonomy_with_evidence(cards, taxonomy, evidence_report)
+    card_subjects = label_cards_by_evidence(cards, taxonomy, card_report)
 
     meta = read_note_meta(conn, taxonomy)
     answer_score, subcat_score, subject_score, secondary_subject_score = (
@@ -880,7 +976,7 @@ def compute_scores(
         secondary_subject_score,
         answer_last_seen,
     )
-    return meta, scored, subject_score, secondary_subject_score
+    return meta, scored, subject_score, secondary_subject_score, card_subjects
 
 
 def main() -> None:
@@ -927,6 +1023,15 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--card-report",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Write every per-card subject (note id, category, from, to, gap) to "
+            "PATH as a TSV; combine with --analysis-only to preview"
+        ),
+    )
+    parser.add_argument(
         "--analysis-only",
         action="store_true",
         help="Print analysis and exit without writing the deck",
@@ -957,6 +1062,7 @@ def main() -> None:
 
     taxonomy_path = Path(args.taxonomy)
     evidence_report = Path(args.evidence_report) if args.evidence_report else None
+    card_report = Path(args.card_report) if args.card_report else None
 
     # Refresh mode: read AND write the live collection, so manual note edits are
     # what gets scored. No .colpkg is involved, which also removes any chance of
@@ -1012,8 +1118,8 @@ def main() -> None:
             logger.info(f"Backed up live DB to {backup_path}")
 
         live_conn = connect_anki(live_db_path)
-        meta, scored, subject_score, secondary_subject_score = compute_scores(
-            live_conn, taxonomy_path, evidence_report
+        meta, scored, subject_score, secondary_subject_score, card_subjects = (
+            compute_scores(live_conn, taxonomy_path, evidence_report, card_report)
         )
         print_report(meta, scored, subject_score, secondary_subject_score)
 
@@ -1029,7 +1135,9 @@ def main() -> None:
         ensure_badge_styles(live_conn)
         score_ord, details_ord = add_frequency_fields_and_template(live_conn)
         latest_year = max((item[5] for item in meta.values()), default=0)
-        recent_subject_counts, start_year = build_recent_subject_counts(meta, latest_year)
+        recent_subject_counts, start_year = build_recent_subject_counts(
+            meta, latest_year, card_subjects
+        )
         apply_scores_and_tags(
             live_conn,
             meta,
@@ -1039,6 +1147,7 @@ def main() -> None:
             latest_year,
             recent_subject_counts,
             start_year,
+            card_subjects,
         )
         live_conn.commit()
         live_conn.close()
@@ -1056,8 +1165,8 @@ def main() -> None:
             logger.info(f"Extracting {source_path}")
             db_path = extract_colpkg(source_path, tmp_path)
             conn = connect_anki(db_path)
-            meta, scored, subject_score, secondary_subject_score = compute_scores(
-                conn, taxonomy_path, evidence_report
+            meta, scored, subject_score, secondary_subject_score, card_subjects = (
+                compute_scores(conn, taxonomy_path, evidence_report, card_report)
             )
             print_report(meta, scored, subject_score, secondary_subject_score)
             conn.close()
@@ -1077,7 +1186,9 @@ def main() -> None:
             ensure_badge_styles(conn)
             score_ord, details_ord = add_frequency_fields_and_template(conn)
             latest_year = max((item[5] for item in meta.values()), default=0)
-            recent_subject_counts, start_year = build_recent_subject_counts(meta, latest_year)
+            recent_subject_counts, start_year = build_recent_subject_counts(
+                meta, latest_year, card_subjects
+            )
             apply_scores_and_tags(
                 conn,
                 meta,
@@ -1087,6 +1198,7 @@ def main() -> None:
                 latest_year,
                 recent_subject_counts,
                 start_year,
+                card_subjects,
             )
 
             # Find the Jeopardy deck, rename it, then strip all other decks so
