@@ -22,3 +22,7 @@ distribution = false
 
 [tool.mypy]
 mypy_path = "stubs"
+
+[tool.pytest.ini_options]
+testpaths = ["decks"]
+pythonpath = ["."]

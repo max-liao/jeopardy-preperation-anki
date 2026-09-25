@@ -221,3 +221,7 @@ __marimo__/
 *.apkg
 *.colpkg
 *.bak
+
+# Language-deck tooling: downloaded datasets and caches, per-run plans, journals and staged media
+decks/language/data/
+decks/language/runs/
