@@ -11,6 +11,7 @@ import re
 import shutil
 import sqlite3
 import sys
+import time
 from collections import defaultdict
 from pathlib import Path
 from typing import Final, TypedDict
@@ -34,6 +35,7 @@ from jeopardy_consts import (
     PRIOR_WEIGHT,
     ROUND_FINAL_JEOPARDY,
     TOTAL_FIELDS,
+    USN_PENDING,
     WEAKNESS_EASE_PENALTY,
     WEAKNESS_PRIORITY_BOOST,
 )
@@ -352,11 +354,37 @@ def apply_updates(
     tag_updates: list[tuple[str, int]],
     due_updates: list[tuple[int, int]],
 ) -> None:
-    """Write ease, tag, and due updates in a single transaction."""
+    """Write ease, tag, and due updates in a single transaction.
+
+    Every row is stamped `usn = USN_PENDING` and given a fresh `mod`. This is
+    what makes the changes *syncable*: Anki decides what to upload by comparing
+    each row's `usn` against the collection's, so a row rewritten in place with
+    its original `usn` is considered already-uploaded and is silently never
+    sent. Without this the reordered `due` positions stayed on this machine
+    only — the desktop showed correct day-category groups while every synced
+    device kept the old order (and so kept serving one giant category run).
+
+    Note that `smart_prep.py` gets away without per-row `usn` stamping only
+    because it also bumps `col.scm`, forcing a full sync that re-uploads
+    everything wholesale. Nothing here changes the schema, so incremental sync
+    is the path these writes actually take.
+    """
+    now = int(time.time())
     with conn:
-        conn.executemany("UPDATE cards SET factor = ? WHERE id = ?", ease_updates)
-        conn.executemany("UPDATE notes SET tags = ? WHERE id = ?", tag_updates)
-        conn.executemany("UPDATE cards SET due = ? WHERE id = ?", due_updates)
+        conn.executemany(
+            "UPDATE cards SET factor = ?, mod = ?, usn = ? WHERE id = ?",
+            [(factor, now, USN_PENDING, cid) for factor, cid in ease_updates],
+        )
+        conn.executemany(
+            "UPDATE notes SET tags = ?, mod = ?, usn = ? WHERE id = ?",
+            [(tags, now, USN_PENDING, nid) for tags, nid in tag_updates],
+        )
+        conn.executemany(
+            "UPDATE cards SET due = ?, mod = ?, usn = ? WHERE id = ?",
+            [(due, now, USN_PENDING, cid) for due, cid in due_updates],
+        )
+        # Mark the collection itself modified so Anki notices pending changes.
+        conn.execute("UPDATE col SET mod = ?", (int(time.time() * 1000),))
 
 
 def print_report(

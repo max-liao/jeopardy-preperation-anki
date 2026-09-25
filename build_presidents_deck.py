@@ -346,19 +346,14 @@ PRESIDENCIES: tuple[Presidency, ...] = (
         ("Pendleton Civil Service Reform Act (1883)",),
     ),
     Presidency(
-        "22 & 24",
+        "22",
         "Grover Cleveland",
-        "1885–1889, 1893–1897",
+        "1885–1889",
         "Democratic",
+        ("Thomas A. Hendricks (died in office, 1885)",),
         (
-            "Thomas A. Hendricks (1885, died in office)",
-            "Adlai Stevenson I (1893–1897)",
-        ),
-        (
-            "Only president to serve two nonconsecutive terms until Trump (2025)",
+            "First of two nonconsecutive terms (also 24th president)",
             "Vetoed a record number of bills",
-            "Panic of 1893",
-            "Pullman Strike (1894)",
         ),
     ),
     Presidency(
@@ -371,6 +366,18 @@ PRESIDENCIES: tuple[Presidency, ...] = (
             "Sherman Antitrust Act (1890)",
             "Sherman Silver Purchase Act (1890)",
             "Admitted six new states",
+        ),
+    ),
+    Presidency(
+        "24",
+        "Grover Cleveland",
+        "1893–1897",
+        "Democratic",
+        ("Adlai Stevenson I",),
+        (
+            "Second, nonconsecutive term (also 22nd president)",
+            "Panic of 1893",
+            "Pullman Strike (1894)",
         ),
     ),
     Presidency(
@@ -615,17 +622,15 @@ PRESIDENCIES: tuple[Presidency, ...] = (
         ),
     ),
     Presidency(
-        "45 & 47",
+        "45",
         "Donald Trump",
-        "2017–2021, 2025–present",
+        "2017–2021",
         "Republican",
-        ("Mike Pence (2017–2021)", "JD Vance (2025–present)"),
+        ("Mike Pence",),
         (
-            "Second president to serve two nonconsecutive terms (after Grover Cleveland)",
             "Tax Cuts and Jobs Act (2017)",
-            "COVID-19 pandemic response (2020)",
-            "Impeached twice during first term (acquitted both times)",
-            "Major tariff policy overhaul (second term)",
+            "COVID-19 pandemic response",
+            "Impeached twice (acquitted both times)",
         ),
     ),
     Presidency(
@@ -638,6 +643,17 @@ PRESIDENCIES: tuple[Presidency, ...] = (
             "Infrastructure Investment and Jobs Act (2021)",
             "U.S. withdrawal from Afghanistan (2021)",
             "Oldest person to serve as president",
+        ),
+    ),
+    Presidency(
+        "47",
+        "Donald Trump",
+        "2025–present",
+        "Republican",
+        ("JD Vance",),
+        (
+            "Second president (after Grover Cleveland) to serve two nonconsecutive terms",
+            "Major tariff policy overhaul",
         ),
     ),
 )
