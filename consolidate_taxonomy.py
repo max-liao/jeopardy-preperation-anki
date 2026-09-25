@@ -360,6 +360,23 @@ MANUAL_OVERRIDES: Final[dict[str, tuple[str, str]]] = {
     "FACTS & FIGURES":            ("Other", "Unclassified"),
     "POT LUCK":                   ("Other", "Unclassified"),
     "MISCELLANEOUS":              ("Other", "Unclassified"),
+    # ── Evidence-rule misfires ───────────────────────────────────────────────
+    # The answer-vote rule in jeopardy_taxonomy_helpers.py would move these, and a
+    # hand check (2026-09-25) found each move wrong. Pinned at their current labels.
+    "ACTUAL POLICE BLOTTER REPORTS": ("Other", "Unclassified"),
+    "ADAPTERS":                   ("Other", "Unclassified"),
+    "CLASSIC CRIME NOVELS":       ("Other", "Unclassified"),
+    "FOREIGN GEOGRAPHIC TERMS":   ("Other", "Unclassified"),
+    '"NIGHT"S':                   ("Other", "Unclassified"),
+    "THE 3-NAMED EDGARS":         ("Other", "Unclassified"),
+    "TOUGH FACTS":                ("Other", "Unclassified"),
+    '"JACKS" OF ALL TRADES':      ("Wordplay & Language", "Idioms"),
+    '"PRO"':                      ("Wordplay & Language", "PR Words"),
+    'SAY THE "MAGIC" WORDS':      ("Wordplay & Language", "Wordplay"),
+    "WAS HIS NAME O'":            ("Wordplay & Language", "Wordplay"),
+    '"WE" THE PEOPLE':            ("Wordplay & Language", "Wordplay"),
+    '"CEL"EBRITY WORDS':          ("Pop Culture", "Celebrities"),
+    "MOBILE HOMES":               ("Business & Economics", "Real Estate"),
 }
 
 # ---------------------------------------------------------------------------

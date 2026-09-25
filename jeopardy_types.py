@@ -1,6 +1,7 @@
 """Type definitions for Jeopardy collection processing."""
 
-from typing import Literal, TypedDict
+from collections.abc import Mapping
+from typing import Literal, NamedTuple, TypedDict
 
 
 class AnswerFrequency(TypedDict):
@@ -33,6 +34,40 @@ class CategoryClassification(TypedDict):
     # secondary_subject="Science". Used in blended scoring so the card gets
     # credit in both its format domain and its knowledge domain.
     secondary_subject: str  # "" if purely wordplay / no secondary domain
+
+
+# One category's classification as smart_prep.py consumes it:
+# (subject, sub_category, secondary_subject).
+TaxonomyEntry = tuple[str, str, str]
+
+
+class EvidenceReclassification(TypedDict):
+    """A category moved to a real subject because its cards point there."""
+
+    category: str  # normalized (uppercased) on-air category text
+    notes: int  # cards in the category that carry a usable answer
+    source_subject: str  # the name-only label: "Other" or "Wordplay & Language"
+    subject: str  # the subject the evidence moved it to
+    mean_share: float  # mean answer share of `subject` across the cards, 0.0-1.0
+    runner_up: str  # the next-best subject by answer share
+    runner_up_share: float  # its mean share, 0.0-1.0
+
+
+class SubjectEvidence(NamedTuple):
+    """What a category's answers say: the best subject and its runner-up."""
+
+    subject: str
+    share: float  # mean answer share, 0.0-1.0
+    runner_up: str
+    runner_up_share: float
+
+
+class ClueVocabulary(NamedTuple):
+    """Clue-word counts per subject: a naive Bayes model learned from the deck."""
+
+    word_counts: Mapping[str, Mapping[str, int]]  # subject -> word -> occurrences
+    totals: Mapping[str, int]  # subject -> words seen in its clues
+    vocabulary_size: int  # distinct words across every subject
 
 
 class NoteRow(TypedDict):

@@ -16,11 +16,12 @@ category taxonomy (see classify_categories.py), this:
 Usage:
   python smart_prep.py SOURCE.colpkg OUTPUT.apkg
       [--taxonomy category_taxonomy.json] [--analysis-only]
-      [--deck-name "Jeopardy Smart Prep"]
+      [--evidence-report moves.tsv] [--deck-name "Jeopardy Smart Prep"]
 """
 
 import argparse
 import bisect
+import csv
 import json
 import logging
 import re
@@ -29,11 +30,12 @@ import sqlite3
 import sys
 import tempfile
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
 
+from consolidate_taxonomy import MANUAL_OVERRIDES
 from jeopardy_consts import (
     BADGE_STYLE_BLOCK,
     BADGE_STYLE_MARKER,
@@ -41,12 +43,15 @@ from jeopardy_consts import (
     CARD_AGE_WEIGHTS,
     ERA_MODERN_START,
     ERA_RECENT_START,
+    EVIDENCE_REPORT_COLUMNS,
+    EVIDENCE_REPORT_TOP_N,
     FIELD_AIR_DATE,
     LIVENESS_DEFAULT,
     LIVENESS_WEIGHTS,
     FIELD_ANSWER,
     FIELD_CATEGORY,
     FIELD_DAILY_DOUBLE,
+    FIELD_QUESTION,
     FIELD_ROUND,
     FIELD_VALUE,
     FREQ_DETAILS_FIELD_CONFIG_HEX,
@@ -67,6 +72,7 @@ from jeopardy_consts import (
     STAKE_J_MIN,
     STAKE_J_VALUE_MAX,
     STAKE_J_VALUE_MIN,
+    SUBCATEGORY_UNCLASSIFIED,
     SUBJECT_OTHER,
     SUBJECT_BADGE_CLASS,
     THEME_WINDOW_YEARS,
@@ -85,14 +91,18 @@ from jeopardy_db_helpers import (
     merge_plural_variants,
     normalize_answer,
     extract_colpkg,
+    get_deck_id,
     pack_apkg,
     protobuf_prepend_to_field1,
     protobuf_get_field,
     protobuf_replace_fields,
     rename_deck,
     require_anki_closed,
+    reset_review_progress,
     strip_foreign_decks,
 )
+from jeopardy_taxonomy_helpers import reclassify_by_evidence
+from jeopardy_types import EvidenceReclassification
 
 logging.basicConfig(
     level=logging.INFO,
@@ -107,6 +117,10 @@ Tier = Literal["high", "medium", "low", "rare"]
 NoteMeta = tuple[str, str, str, str, str, int, float]
 
 _DEFAULT_SUBCAT = "Miscellaneous"
+# Sub-category labels that mean "no topic"; score_notes() gives them no credit.
+_NO_TOPIC_SUBCATS: frozenset[str] = frozenset(
+    {_DEFAULT_SUBCAT, SUBCATEGORY_UNCLASSIFIED}
+)
 _TAG_SANITIZE_RE = re.compile(r"[^A-Za-z0-9]+")
 
 
@@ -255,6 +269,103 @@ def load_taxonomy(path: Path) -> dict[str, tuple[str, str, str]]:
     return out
 
 
+def read_category_cards(
+    conn: sqlite3.Connection,
+) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+    """Group every Jeopardy note's answer and clue under its on-air category.
+
+    Args:
+        conn: SQLite connection
+
+    Returns:
+        (uppercased category -> normalized answer key of each of its notes,
+        skipping notes whose answer is empty or punctuation-only;
+        uppercased category -> clue text of each of its notes)
+    """
+    cursor = conn.cursor()
+    cursor.execute("SELECT flds FROM notes WHERE mid = ?", (JEOPARDY_NOTETYPE_ID,))
+    answers_by_category: dict[str, list[str]] = defaultdict(list)
+    clues_by_category: dict[str, list[str]] = defaultdict(list)
+    for (flds,) in cursor:
+        parts = flds.split("\x1f")
+        if len(parts) < TOTAL_FIELDS:
+            continue
+        category = parts[FIELD_CATEGORY].strip().upper()
+        clues_by_category[category].append(parts[FIELD_QUESTION])
+        answer_key = normalize_answer(parts[FIELD_ANSWER].strip())
+        if answer_key:
+            answers_by_category[category].append(answer_key)
+    return dict(answers_by_category), dict(clues_by_category)
+
+
+def log_evidence_reclassifications(moved: list[EvidenceReclassification]) -> None:
+    """Summarize the evidence moves by source and target, then list the largest."""
+    cards = sum(item["notes"] for item in moved)
+    logger.info(f"Evidence reclassification: {len(moved)} categories ({cards:,} cards)")
+    by_move = Counter((item["source_subject"], item["subject"]) for item in moved)
+    for (source, subject), count in by_move.most_common(EVIDENCE_REPORT_TOP_N):
+        logger.info(f"  {count:>4} categories  {source} -> {subject}")
+    if len(by_move) > EVIDENCE_REPORT_TOP_N:
+        logger.info(f"  ... and {len(by_move) - EVIDENCE_REPORT_TOP_N} more pairs")
+    for item in moved[:EVIDENCE_REPORT_TOP_N]:
+        logger.info(
+            f"  {item['category']} ({item['notes']} cards): {item['source_subject']}"
+            f" -> {item['subject']}, share {item['mean_share']:.2f}"
+            f" vs {item['runner_up']} {item['runner_up_share']:.2f}"
+        )
+    if len(moved) > EVIDENCE_REPORT_TOP_N:
+        logger.info(f"  ... and {len(moved) - EVIDENCE_REPORT_TOP_N} more")
+
+
+def write_evidence_report(path: Path, moved: list[EvidenceReclassification]) -> None:
+    """Write every evidence move as a TSV, for review before a live refresh."""
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f, delimiter="\t", lineterminator="\n")
+        writer.writerow(EVIDENCE_REPORT_COLUMNS)
+        for item in moved:
+            writer.writerow(
+                (
+                    item["category"],
+                    item["notes"],
+                    item["source_subject"],
+                    item["subject"],
+                    f"{item['mean_share']:.3f}",
+                    item["runner_up"],
+                    f"{item['runner_up_share']:.3f}",
+                )
+            )
+    logger.info(f"Wrote {len(moved)} evidence reclassifications to {path}")
+
+
+def refine_taxonomy_with_evidence(
+    conn: sqlite3.Connection,
+    taxonomy: dict[str, tuple[str, str, str]],
+    evidence_report: Path | None = None,
+) -> dict[str, tuple[str, str, str]]:
+    """Move Other and Wordplay categories to the subject their cards point to.
+
+    The name-only LLM pass cannot place a pun like "A NOVEL PASSAGE" or a letter
+    game like 'CAPITAL "C"'; their cards can (see jeopardy_taxonomy_helpers).
+    Manual overrides are never moved.
+
+    Args:
+        conn: SQLite connection
+        taxonomy: category -> (subject, sub_category, secondary_subject)
+        evidence_report: if set, every move is also written here as a TSV
+
+    Returns:
+        A refined copy of the taxonomy (the input is not mutated)
+    """
+    answers, clues = read_category_cards(conn)
+    refined, moved = reclassify_by_evidence(
+        taxonomy, answers, clues, MANUAL_OVERRIDES.keys()
+    )
+    log_evidence_reclassifications(moved)
+    if evidence_report is not None:
+        write_evidence_report(evidence_report, moved)
+    return refined
+
+
 def read_note_meta(
     conn: sqlite3.Connection, taxonomy: dict[str, tuple[str, str, str]]
 ) -> dict[int, NoteMeta]:
@@ -395,10 +506,10 @@ def score_notes(
     Returns:
         note_id -> (score 0-100, tier)
     """
-    # Per-note component raw values. "Other" subject and "Miscellaneous"
-    # sub-category are the ABSENCE of a topic (grab-bag/unclassified), so they
-    # earn no topic-frequency credit — their components are zeroed and the card
-    # is scored on its exact-answer frequency alone.
+    # Per-note component raw values. "Other" subject and the "Miscellaneous" /
+    # "Unclassified" sub-categories are the ABSENCE of a topic (grab-bag/unclassified),
+    # so they earn no topic-frequency credit — their components are zeroed and the
+    # card is scored on its exact-answer frequency alone.
     av: dict[int, float] = {}
     cv: dict[int, float] = {}
     sv: dict[int, float] = {}
@@ -415,7 +526,7 @@ def score_notes(
         av[nid] = answer_score.get(answer_key, 0.0) if answer_key else 0.0
         cv[nid] = (
             0.0
-            if subcat_label == _DEFAULT_SUBCAT
+            if subcat_label in _NO_TOPIC_SUBCATS
             else subcat_score.get(subcat_key, 0.0)
         )
         primary_sv = (
@@ -674,7 +785,7 @@ def apply_scores_and_tags(
         kept = [
             t
             for t in tags.split()
-            if not t.startswith(("freq:", "subject:", "subcat:", "era:"))
+            if not t.startswith(("freq:", "subject:", "subcat:", "subcat2:", "era:"))
         ]
         kept.append(f"freq:{tier}")
         kept.append(f"subject:{sanitize_tag_value(subject)}")
@@ -734,7 +845,7 @@ def print_report(
 
 
 def compute_scores(
-    conn: sqlite3.Connection, taxonomy_path: Path
+    conn: sqlite3.Connection, taxonomy_path: Path, evidence_report: Path | None = None
 ) -> tuple[
     dict[int, NoteMeta], dict[int, tuple[int, Tier]], dict[str, float], dict[str, float]
 ]:
@@ -743,12 +854,14 @@ def compute_scores(
     Args:
         conn: SQLite connection to a collection holding the Jeopardy notes
         taxonomy_path: Path to category_taxonomy.json
+        evidence_report: if set, the evidence reclassifications are written here
 
     Returns:
         (meta, scored, subject_score, secondary_subject_score)
     """
     taxonomy = load_taxonomy(taxonomy_path)
     logger.info(f"Loaded taxonomy with {len(taxonomy)} categories")
+    taxonomy = refine_taxonomy_with_evidence(conn, taxonomy, evidence_report)
 
     meta = read_note_meta(conn, taxonomy)
     answer_score, subcat_score, subject_score, secondary_subject_score = (
@@ -805,22 +918,87 @@ def main() -> None:
         help="Name for the output deck (default: 'Jeopardy Smart Prep')",
     )
     parser.add_argument(
+        "--evidence-report",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Write every evidence reclassification (category, cards, from, to, "
+            "shares) to PATH as a TSV; combine with --analysis-only to preview"
+        ),
+    )
+    parser.add_argument(
         "--analysis-only",
         action="store_true",
         help="Print analysis and exit without writing the deck",
     )
+    parser.add_argument(
+        "--clean-export",
+        metavar="PATH",
+        help=(
+            "Write a full shareable copy of the current collection to PATH with all "
+            "review progress cleared. Keeps the full deck content but removes due "
+            "dates, intervals, and revlog data."
+        ),
+    )
+    parser.add_argument(
+        "--clean-deck-name",
+        default="jeopardy_enhanced_clean",
+        help="Name to assign to the exported clean deck (default: 'jeopardy_enhanced_clean')",
+    )
     args = parser.parse_args()
 
-    if not args.analysis_only and not args.output and not args.live_db:
+    if args.clean_export:
+        if not args.source and not args.live_db:
+            parser.error("source is required when using --clean-export unless --live-db is set")
+    elif not args.analysis_only and not args.output and not args.live_db:
         parser.error("output is required unless --live-db or --analysis-only is set")
-    if not args.source and not args.live_db:
+    if not args.clean_export and not args.source and not args.live_db:
         parser.error("source is required unless --live-db is set")
 
     taxonomy_path = Path(args.taxonomy)
+    evidence_report = Path(args.evidence_report) if args.evidence_report else None
 
     # Refresh mode: read AND write the live collection, so manual note edits are
     # what gets scored. No .colpkg is involved, which also removes any chance of
     # the source drifting out of sync with the collection.
+    if args.clean_export:
+        if args.live_db:
+            live_db_path = Path(args.live_db).expanduser().resolve()
+            if not live_db_path.exists():
+                logger.error(f"Live DB not found: {live_db_path}")
+                sys.exit(1)
+            require_anki_closed(live_db_path)
+            live_conn = connect_anki(live_db_path)
+            clean_deck_id = get_deck_id(live_conn)
+            rename_deck(live_conn, clean_deck_id, args.clean_deck_name)
+            reset_review_progress(live_conn)
+            live_conn.commit()
+            live_conn.close()
+            pack_apkg(live_db_path, Path(args.clean_export))
+            logger.info(f"✓ Clean shareable export written to {args.clean_export}")
+            return
+
+        source_path = Path(args.source)
+        if not source_path.exists():
+            logger.error(f"Source not found: {source_path}")
+            sys.exit(1)
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                tmp_path = Path(tmpdir)
+                db_path = extract_colpkg(source_path, tmp_path)
+                conn = connect_anki(db_path)
+                clean_deck_id = get_deck_id(conn)
+                rename_deck(conn, clean_deck_id, args.clean_deck_name)
+                reset_review_progress(conn)
+                conn.commit()
+                conn.close()
+                pack_apkg(db_path, Path(args.clean_export))
+                logger.info(f"✓ Clean shareable export written to {args.clean_export}")
+        except Exception as exc:
+            logger.exception(f"Error: {exc}")
+            sys.exit(1)
+        return
+
     if args.live_db:
         live_db_path = Path(args.live_db).expanduser().resolve()
         if not live_db_path.exists():
@@ -835,7 +1013,7 @@ def main() -> None:
 
         live_conn = connect_anki(live_db_path)
         meta, scored, subject_score, secondary_subject_score = compute_scores(
-            live_conn, taxonomy_path
+            live_conn, taxonomy_path, evidence_report
         )
         print_report(meta, scored, subject_score, secondary_subject_score)
 
@@ -879,7 +1057,7 @@ def main() -> None:
             db_path = extract_colpkg(source_path, tmp_path)
             conn = connect_anki(db_path)
             meta, scored, subject_score, secondary_subject_score = compute_scores(
-                conn, taxonomy_path
+                conn, taxonomy_path, evidence_report
             )
             print_report(meta, scored, subject_score, secondary_subject_score)
             conn.close()

@@ -685,6 +685,36 @@ def get_max_new_due(conn: sqlite3.Connection) -> int:
     return max_due
 
 
+def reset_review_progress(conn: sqlite3.Connection) -> None:
+    """Reset all card scheduling/progress without deleting notes or cards.
+
+    This clears due dates, intervals, review counts, and revlog entries so a
+    packaged deck is importable and shareable without exposing the original
+    user's learning progress.
+    """
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM revlog")
+    cursor.execute(
+        """
+        UPDATE cards
+        SET queue = 0,
+            type = 0,
+            due = 1,
+            ivl = 0,
+            factor = 2500,
+            reps = 0,
+            lapses = 0,
+            left = 0,
+            odue = 0,
+            odid = 0,
+            mod = 0,
+            usn = 0
+        """
+    )
+    conn.commit()
+    logger.info("Reset card review progress and cleared revlog")
+
+
 def strip_foreign_decks(conn: sqlite3.Connection, keep_deck_id: int) -> None:
     """Delete all decks except keep_deck_id and their cards, revlog, and orphaned notes.
 
@@ -731,6 +761,7 @@ def pack_apkg(db_path: Path, output: Path) -> None:
         db_path: Path to the plain (uncompressed) collection.anki2 database
         output: Output .apkg path
     """
+    output.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.write(db_path, arcname="collection.anki2")
         zf.writestr("media", "{}")

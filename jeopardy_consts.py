@@ -168,8 +168,10 @@ ROUND_CODE_TO_NAME: Final[dict[str, str]] = {
 
 # Closed vocabulary of broad SUBJECTS for category classification.
 # A controlled set so subject-level frequency rollups aggregate cleanly.
+SUBJECT_LITERATURE: Final[str] = "Literature"
+SUBJECT_WORDPLAY: Final[str] = "Wordplay & Language"
 SUBJECTS: Final[tuple[str, ...]] = (
-    "Literature",
+    SUBJECT_LITERATURE,
     "History",
     "Geography",
     "Science",
@@ -178,7 +180,7 @@ SUBJECTS: Final[tuple[str, ...]] = (
     "Art",
     "Film & TV",
     "Sports",
-    "Wordplay & Language",
+    SUBJECT_WORDPLAY,
     "Pop Culture",
     "Food & Drink",
     "People",
@@ -188,6 +190,10 @@ SUBJECTS: Final[tuple[str, ...]] = (
     "Other",
 )
 SUBJECT_OTHER: Final[str] = "Other"
+# The sub-category consolidate_taxonomy.py gives every catch-all (Miscellaneous,
+# Potpourri, General…). Like smart_prep's "Miscellaneous" default for categories
+# missing from the taxonomy, it marks the absence of a topic.
+SUBCATEGORY_UNCLASSIFIED: Final[str] = "Unclassified"
 
 # Short per-subject class codes, expanded back to full text by CSS in the card
 # template (see BADGE_STYLE_BLOCK). Same trade as TIER_BADGE_CLASS: the code on
@@ -296,3 +302,74 @@ CLASSIFY_MAX_RETRIES: Final[int] = 5
 CLASSIFY_RETRY_BACKOFF_SECS: Final[float] = 10.0
 CLASSIFY_WORKERS: Final[int] = 2
 TAXONOMY_PATH_DEFAULT: Final[str] = "category_taxonomy.json"
+
+# --- Evidence-based reclassification --------------------------------------
+# classify_categories.py sees only a category's NAME, so a pun ("A NOVEL PASSAGE"),
+# a letter game ('CAPITAL "C"') or a name it failed to echo back lands in Other or
+# Wordplay & Language even when every card tests one subject. smart_prep.py
+# therefore re-examines those categories using their CARDS: an answer belongs to a
+# subject to the degree that, elsewhere in the deck, it appears in categories
+# already classified under that subject (see jeopardy_taxonomy_helpers.py).
+#
+# Subjects the evidence may move a category INTO: every real subject. Wordplay &
+# Language is reserved for categories whose content is language itself, which no
+# answer evidence can establish, and "Other" is the absence of a subject.
+EVIDENCE_TARGET_SUBJECTS: Final[tuple[str, ...]] = tuple(
+    subject for subject in SUBJECTS if subject not in (SUBJECT_OTHER, SUBJECT_WORDPLAY)
+)
+# Subjects whose categories do not vote on where an answer belongs. Wordplay
+# categories recycle answers from every domain (a novel's title turns up in a
+# rhyme-time category just as easily as in a books one), so their votes are
+# noise; "Other" categories are the ones being re-examined.
+EVIDENCE_NON_VOTING_SUBJECTS: Final[frozenset[str]] = frozenset(
+    {SUBJECT_WORDPLAY, SUBJECT_OTHER}
+)
+# An answer seen in fewer classified categories than this is an anecdote, not
+# evidence, and contributes nothing.
+EVIDENCE_MIN_ANSWER_VOTES: Final[int] = 2
+# Categories with fewer usable cards than this are too thin to judge.
+EVIDENCE_MIN_CATEGORY_NOTES: Final[int] = 3
+# Which name-only labels are re-examined, and how much answer evidence it takes to
+# overrule each: the best subject's mean share across the category's cards.
+# "Other" means the name told the classifier nothing. "Wordplay & Language" means
+# it saw a word game, and for some of those the language IS the content (idioms,
+# double meanings), so it takes more. A real subject is re-checked at the same
+# bar, because puns fool the name-only pass there too ("CAPITALISM", filed under
+# Business, is five world capitals). Every cut was calibrated by reading every
+# move it makes (see JEOPARDY_PREP_DECK.md).
+EVIDENCE_MIN_MEAN_SHARE_LABELED: Final[float] = 0.5
+EVIDENCE_MIN_MEAN_SHARE_BY_SOURCE: Final[dict[str, float]] = {
+    **{
+        subject: EVIDENCE_MIN_MEAN_SHARE_LABELED for subject in EVIDENCE_TARGET_SUBJECTS
+    },
+    SUBJECT_OTHER: 0.45,
+    SUBJECT_WORDPLAY: 0.5,
+}
+# The best subject must also lead the runner-up by this much, so a category whose
+# answers are split between, say, History and Geography stays where it is.
+EVIDENCE_MIN_MARGIN: Final[float] = 0.2
+# Absorbs float rounding in the two comparisons above (0.6 - 0.4 is
+# 0.19999999999999996, which must still count as a margin of 0.2).
+EVIDENCE_FLOAT_TOLERANCE: Final[float] = 1e-9
+# Second, independent signal: a naive Bayes model of clue WORDS per subject,
+# learned from every classified category (Wordplay included). A move needs it to
+# name the same subject as the answers. It catches answers that belong to another
+# medium (RUSSIAN OPERA: literary works, operatic clues) and word games whose
+# answers are domain nouns (a body-part vocabulary category reads as Wordplay).
+EVIDENCE_CLUE_SUBJECTS: Final[tuple[str, ...]] = EVIDENCE_TARGET_SUBJECTS + (
+    SUBJECT_WORDPLAY,
+)
+EVIDENCE_CLUE_WORD_PATTERN: Final[str] = r"[a-z][a-z']+"  # on casefolded clue text
+EVIDENCE_CLUE_SMOOTHING: Final[float] = 1.0  # add-one (Laplace) word smoothing
+# How many reclassified categories smart_prep.py lists in its log (largest first).
+EVIDENCE_REPORT_TOP_N: Final[int] = 15
+# Header of the full move list written by `smart_prep.py --evidence-report PATH`.
+EVIDENCE_REPORT_COLUMNS: Final[tuple[str, ...]] = (
+    "category",
+    "cards",
+    "from",
+    "to",
+    "share",
+    "runner_up",
+    "runner_up_share",
+)
