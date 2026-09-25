@@ -30,7 +30,7 @@ python configure_deck_options.py --preset Jeopardy
 
 `--live-db` reads **and** writes the live collection, skipping the import step entirely. No `.colpkg` is involved: scoring is computed from the collection itself, so your manual card edits are what gets scored, and there is no way for a stale source file to drift out of sync.
 
-Your card content is never touched — only the frequency badge (field 14) and the `freq:`/`subject:`/`subcat:`/`era:` tags.
+Your card content is never touched — only the frequency badge (field 14), the backside frequency details (field 15), and the `freq:`/`subject:`/`subcat:`/`era:` tags.
 
 ```bash
 # Close Anki first, then:
@@ -45,7 +45,7 @@ Each script writes `collection.anki2.bak` before making changes, and refuses to 
 
 ### ⚠️ AnkiWeb's 300 MB ceiling
 
-AnkiWeb rejects collections over **314,572,800 bytes uncompressed**. With ~452K notes, anything written to *every* note costs ~450 KB per byte, so this limit is easy to trip:
+AnkiWeb rejects collections over **314,572,800 bytes uncompressed**. With ~452K notes, anything written to _every_ note costs ~450 KB per byte, so this limit is easy to trip:
 
 - **Badge markup lives in the template, not the note.** The badge is `<b class="fq h">85</b>` (22 bytes) and `BADGE_STYLE_BLOCK` supplies the CSS once. An earlier inline-styled version was 174 bytes/note = **79 MB** on its own and broke syncing. Never inline styles into the badge.
 - **Default-valued tags are not written.** `perf:new` (99.8% of the deck) and `perfsubcat:strong` are omitted; their absence means the same thing. Restoring them costs ~20 MB.
@@ -84,7 +84,7 @@ Jeopardy Smart Prep::Archive   dead cards — out of rotation, never deleted
 | `archive_dead_cards.py`     | Moves dead cards to the Archive subdeck; `--restore` reverses it                          |
 | `smart_prep.py`             | Blended frequency scoring + field/template + tag writes                                   |
 | `study_optimizer.py`        | Ease tuning + perf tags + day-category grouped/value-sorted new-card `due` order          |
-| `configure_deck_options.py` | One-time: new cards before reviews; `--preset` scopes it (see *Study Queue Ordering*)     |
+| `configure_deck_options.py` | One-time: new cards before reviews; `--preset` scopes it (see _Study Queue Ordering_)     |
 | `jeopardy_consts.py`        | All constants: field indices, tier thresholds, recency weights, subjects                  |
 | `jeopardy_types.py`         | TypedDicts: `CategoryClassification`, `NoteRow`, `AnkiCardRow`, etc.                      |
 | `jeopardy_db_helpers.py`    | extract/repack .colpkg, SQLite helpers                                                    |
@@ -109,18 +109,18 @@ topic = 0.40 × answer_percentile
 
 Each component is the **percentile rank** of that note's **stake-weighted recency frequency** across all notes. The stake multiplier reflects round difficulty (Final Jeopardy > Daily Double > regular) and dollar value (higher = harder).
 
-**2 — Relevance decay.** Is it *still* being asked?
+**2 — Relevance decay.** Is it _still_ being asked?
 
 ```
 raw = topic × liveness_weight(answer_last_seen_year) × card_age_weight(card_air_year)
 ```
 
-- **`liveness_weight`** (1.00 → 0.15) keys off the most recent year that answer appeared *anywhere in the corpus*. This is the primary "no longer relevant" signal: a topic that stopped appearing in 1994 is retired no matter how often it came up back then. Measured effect: mean score 64.4 for topics last seen 2020+, versus 3.0 for pre-2000.
+- **`liveness_weight`** (1.00 → 0.15) keys off the most recent year that answer appeared _anywhere in the corpus_. This is the primary "no longer relevant" signal: a topic that stopped appearing in 1994 is retired no matter how often it came up back then. Measured effect: mean score 64.4 for topics last seen 2020+, versus 3.0 for pre-2000.
 - **`card_age_weight`** (1.00 → 0.70) keys off the card's own air year and is deliberately much gentler. An old clue about a live topic keeps most of its value — a 1993 Geography card still scores ~52.8 on average.
 
 **3 — Re-percentile.** The decayed values are ranked again, so the published 0–100 is a true percentile: a score of 85 means "more study-worthy than 85% of the deck". Tier thresholds therefore partition the deck at a stable 30 / 30 / 25 / 15.
 
-> **Answer keys are normalized** (`normalize_answer`) before recurrence and liveness are computed: parentheticals and leading articles are stripped, and plural forms fold into the singular *only when both spellings actually occur*. Matching raw text instead made live topics look retired — "talons" last appears in 1999, but "talon" ran through 2025.
+> **Answer keys are normalized** (`normalize_answer`) before recurrence and liveness are computed: parentheticals and leading articles are stripped, and plural forms fold into the singular _only when both spellings actually occur_. Matching raw text instead made live topics look retired — "talons" last appears in 1999, but "talon" ran through 2025.
 
 | Tier   | Score | Tag           |
 | ------ | ----- | ------------- |
@@ -160,7 +160,7 @@ The intent: categories using a **wordplay format** (Before & After, Rhyme Time, 
 
 Re-running classification on the ~13,245 Wordplay & Language categories produced meaningfully different primary-subject calls for ~1,930 of them (mostly regressing to `Other/Miscellaneous`) — LLM judgment noise across runs, not signal. To avoid that churn, the fix was applied conservatively: every category's existing `subject`/`sub_category` was left untouched, and only `secondary_subject` was grafted in, and only where the reclassification's own subject call agreed with the original (stayed `Wordplay & Language` both times). Result: **2,642 of 13,245** Wordplay & Language categories (**15,020 cards**, 3.3% of the deck) now carry a non-empty `secondary_subject`, sampled and spot-checked for sanity (e.g. `METEOROLOGICAL RHYME TIME` → Science, `THE SUPERB OWL` → Sports, `BABEL-ING ON` → Religion & Mythology). `subcat2:` tags now appear on exactly those 15,020 notes.
 
-**However, re-scoring the live collection (2026-07-28) changed zero cards' `freq:` tier.** `subject_score["Wordplay & Language"]` (44,078, recency-weighted) is larger than *every* `secondary_subject_score` value (the largest, Geography, is 993) — Wordplay & Language is the single biggest subject bucket in the whole taxonomy, so no per-domain secondary slice can ever outweigh it in `max(subject_score, secondary_subject_score)`. The subject component of a wordplay card's blended score was already at its ceiling before this fix; populating `secondary_subject` makes the data honest and lights up `subcat2:` tags (useful for browsing/filtering — see *Useful Anki Browser Searches*), but changing the actual scoring/ranking would need a different formula — e.g. comparing subject and secondary percentiles instead of raw recency-weighted sums. Not implemented; a candidate follow-up if the ranking effect is wanted, not just the tag.
+**However, re-scoring the live collection (2026-07-28) changed zero cards' `freq:` tier.** `subject_score["Wordplay & Language"]` (44,078, recency-weighted) is larger than _every_ `secondary_subject_score` value (the largest, Geography, is 993) — Wordplay & Language is the single biggest subject bucket in the whole taxonomy, so no per-domain secondary slice can ever outweigh it in `max(subject_score, secondary_subject_score)`. The subject component of a wordplay card's blended score was already at its ceiling before this fix; populating `secondary_subject` makes the data honest and lights up `subcat2:` tags (useful for browsing/filtering — see _Useful Anki Browser Searches_), but changing the actual scoring/ranking would need a different formula — e.g. comparing subject and secondary percentiles instead of raw recency-weighted sums. Not implemented; a candidate follow-up if the ranking effect is wanted, not just the tag.
 
 ### Taxonomy Pipeline
 
@@ -198,22 +198,22 @@ The "Jeopardy" notetype has 14 fields (0-indexed, `\x1f`-delimited):
 
 > **Warning:** TSV field names are reversed from natural language. In jwolle1 TSV, `answer` = clue shown, `question` = correct response. The importer maps accordingly.
 
-After `smart_prep.py` runs, field 14 (`Frequency Score`) is added with the HTML badge.
+After `smart_prep.py` runs, field 14 (`Frequency Score`) is added with the HTML badge and field 15 (`Frequency Details`) is added for the card back. The detail count covers the latest five years present in the collection; for the current 1984–2025 dataset, that is 2021–2025.
 
 ---
 
 ## Tags Written by smart_prep.py
 
-| Tag              | Example              | Meaning                                                        |
-| ---------------- | -------------------- | -------------------------------------------------------------- |
-| `freq:{tier}`    | `freq:high`          | Blended frequency tier                                         |
-| `subject:{name}` | `subject:Literature` | Primary taxonomy subject                                       |
-| `subcat:{name}`  | `subcat:Shakespeare` | Normalized sub-category                                        |
-| `subcat2:{name}` | `subcat2:Science`    | Secondary domain (wordplay only)                               |
-| `era:{era}`      | `era:recent`         | Air date bucket (recent=2020+, modern=2010–2019, old=pre-2010) |
-| `archived:{why}` | `archived:dead-topic` | Why the card was archived (`archive_dead_cards.py`)           |
-| `perf:{tier}`    | `perf:weak`          | Your accuracy on this card (`study_optimizer.py`)              |
-| `perfsubcat:{t}` | `perfsubcat:weak`    | Your accuracy across the whole sub-category                    |
+| Tag              | Example               | Meaning                                                        |
+| ---------------- | --------------------- | -------------------------------------------------------------- |
+| `freq:{tier}`    | `freq:high`           | Blended frequency tier                                         |
+| `subject:{name}` | `subject:Literature`  | Primary taxonomy subject                                       |
+| `subcat:{name}`  | `subcat:Shakespeare`  | Normalized sub-category                                        |
+| `subcat2:{name}` | `subcat2:Science`     | Secondary domain (wordplay only)                               |
+| `era:{era}`      | `era:recent`          | Air date bucket (recent=2020+, modern=2010–2019, old=pre-2010) |
+| `archived:{why}` | `archived:dead-topic` | Why the card was archived (`archive_dead_cards.py`)            |
+| `perf:{tier}`    | `perf:weak`           | Your accuracy on this card (`study_optimizer.py`)              |
+| `perfsubcat:{t}` | `perfsubcat:weak`     | Your accuracy across the whole sub-category                    |
 
 Previous `freq:`, `subject:`, `subcat:`, `era:` tags are stripped and replaced on each run (idempotent).
 
@@ -223,13 +223,13 @@ Previous `freq:`, `subject:`, `subcat:`, `era:` tags are stripped and replaced o
 
 `archive_dead_cards.py` moves genuinely dead cards to the Archive subdeck. Nothing is deleted, and `--restore` reverses everything. Cards you have **already reviewed** and anything aired **2020 or later** are always exempt.
 
-| Reason       | Rule                                                        | Cards  |
-| ------------ | ----------------------------------------------------------- | ------ |
-| `dead-topic` | Answer topic not seen anywhere since 2005                   | 26,182 |
-| `duplicate`  | Near-verbatim restatement of another clue (newest is kept)  | 7,791  |
-| `one-off`    | Answer never repeats in 42 seasons, and clue predates 2010  | 6,725  |
-| `stale`      | Time-anchored wording, aired pre-2015                       | 1,579  |
-| `malformed`  | Answer is empty or punctuation-only, or the clue is blank   | 609    |
+| Reason       | Rule                                                       | Cards  |
+| ------------ | ---------------------------------------------------------- | ------ |
+| `dead-topic` | Answer topic not seen anywhere since 2005                  | 26,182 |
+| `duplicate`  | Near-verbatim restatement of another clue (newest is kept) | 7,791  |
+| `one-off`    | Answer never repeats in 42 seasons, and clue predates 2010 | 6,725  |
+| `stale`      | Time-anchored wording, aired pre-2015                      | 1,579  |
+| `malformed`  | Answer is empty or punctuation-only, or the clue is blank  | 609    |
 
 Two traps that cost real accuracy here, both now guarded:
 
@@ -242,7 +242,7 @@ Two traps that cost real accuracy here, both now guarded:
 
 `study_optimizer.py` doesn't just rank new cards individually — it groups each day's on-air category into a block so related clues surface together instead of being scattered across the deck.
 
-**Groups are up to 5 clues from one category board on one day** (`air_date`, `round`, on-air `category`), ordered **by dollar value, descending** ($1000 → $800 → … or $2000 → $1600 → … in Double Jeopardy) — highest-stakes clue first. Groups themselves are still ordered by the existing weakness-weighted frequency score (highest-priority category first; see *Blended Frequency Score* above), so this changes *presentation order within and around* a category, not which categories are prioritized.
+**Groups are up to 5 clues from one category board on one day** (`air_date`, `round`, on-air `category`), ordered **by dollar value, descending** ($1000 → $800 → … or $2000 → $1600 → … in Double Jeopardy) — highest-stakes clue first. Groups themselves are still ordered by the existing weakness-weighted frequency score (highest-priority category first; see _Blended Frequency Score_ above), so this changes _presentation order within and around_ a category, not which categories are prioritized.
 
 **Final Jeopardy is held out and interspersed, not grouped.** It's one clue/day with a 4x stake multiplier — grouped in with everything else, its outsized score would cluster every Final Jeopardy clue at the very front of the queue instead of spreading them out. Instead, FJ clues are ranked among themselves by the same priority score, then spread evenly across the whole queue (`interleave_blocks()`) so they show up every once in a while — measured at a steady ~14-15 groups apart (roughly one every 60-70 cards) on the current collection.
 
@@ -254,7 +254,7 @@ Fixed by keying groups on `(air_date, round, category)` instead — `air_date` i
 
 ### One-time setup: `configure_deck_options.py`
 
-Grouping cards via `due` order only controls which cards get pulled *from the new-card pool* — by default, Anki still freely interleaves due reviews in between them, so a review card could land in the middle of a 5-card group. Run once:
+Grouping cards via `due` order only controls which cards get pulled _from the new-card pool_ — by default, Anki still freely interleaves due reviews in between them, so a review card could land in the middle of a 5-card group. Run once:
 
 ```bash
 python configure_deck_options.py --preset Jeopardy
@@ -266,7 +266,7 @@ Without `--preset` it applies to **every** deck options group in the collection,
 
 > **This setting lives on the preset, not the deck — creating a new preset silently reverts it.** Assigning `Jeopardy Smart Prep` to a freshly-created options preset in the Anki GUI starts it from Anki's stock defaults ("mix with reviews", learn 1m/10m), regardless of what the old preset had. This is not theoretical: it happened between 2026-07-29 and 2026-08-01 and made a study session look like the grouping fix had failed, when the `due` order was in fact correct the whole time. If groups start getting interrupted again, check the preset first with `python configure_deck_options.py --dry-run` — it reports the current values for every preset and warns if the gather/sort order would break `due` ordering.
 
-**What this can't fix:** a card you mark Again/Hard earlier in the *same session* re-enters the queue on its own learning-step timer regardless of this setting — that's Anki's short-term relearning behavior working as intended (you got it wrong; it's supposed to come back soon), and no deck option suppresses it. Only cross-session reviews and multi-day relearning are deferred behind new cards.
+**What this can't fix:** a card you mark Again/Hard earlier in the _same session_ re-enters the queue on its own learning-step timer regardless of this setting — that's Anki's short-term relearning behavior working as intended (you got it wrong; it's supposed to come back soon), and no deck option suppresses it. Only cross-session reviews and multi-day relearning are deferred behind new cards.
 
 ---
 
@@ -282,7 +282,7 @@ tag:archived:dead-topic                → archived because the topic retired
 -deck:*Archive* tag:perfsubcat:weak    → active cards in your weak sub-categories
 ```
 
-Targeting the measured weak spots (see *Study Performance* below):
+Targeting the measured weak spots (see _Study Performance_ below):
 
 ```
 tag:perfsubcat:weak tag:freq:high      → weak AND frequently asked — best ROI
@@ -298,16 +298,16 @@ From 6,037 reviews across 2,108 cards. Accuracy is Bayesian-blended (prior 70% @
 
 **Weakest subjects, weighted by share of recent-game clue volume:**
 
-| Subject             | Accuracy | Share of 2020+ clues |
-| ------------------- | -------- | -------------------- |
-| Wordplay & Language | 82.9%    | **22.0%**            |
-| Literature          | **70.5%**| 8.6%                 |
-| Film & TV           | **72.4%**| 7.8%                 |
-| History             | 76.1%    | 8.2%                 |
-| Music               | 75.4%    | 6.0%                 |
-| Science             | 86.6%    | 5.5%                 |
+| Subject             | Accuracy  | Share of 2020+ clues |
+| ------------------- | --------- | -------------------- |
+| Wordplay & Language | 82.9%     | **22.0%**            |
+| Literature          | **70.5%** | 8.6%                 |
+| Film & TV           | **72.4%** | 7.8%                 |
+| History             | 76.1%     | 8.2%                 |
+| Music               | 75.4%     | 6.0%                 |
+| Science             | 86.6%     | 5.5%                 |
 
-**The dominant pattern is people-based recall.** The worst sub-categories cluster hard: U.S. Presidents 46.4%, Americans 47.7%, Politicians 40.9%, People 50.0%, European Royalty 55.0%, American Women 54.2%, Historical Figures 58.7%, Biblical Characters 53.1%. Naming *who did a thing* is the weak spot, not the thing itself.
+**The dominant pattern is people-based recall.** The worst sub-categories cluster hard: U.S. Presidents 46.4%, Americans 47.7%, Politicians 40.9%, People 50.0%, European Royalty 55.0%, American Women 54.2%, Historical Figures 58.7%, Biblical Characters 53.1%. Naming _who did a thing_ is the weak spot, not the thing itself.
 
 Geography is the clear strength (Cities 94.2%, Countries 87.5%, Rivers & Lakes 80.4%) — coast there.
 
@@ -325,7 +325,7 @@ Geography is the clear strength (Cities 94.2%, Countries 87.5%, Rivers & Lakes 8
 - [x] **Topic-liveness + card-age decay** — outdated material now scores low; see Algorithm above
 - [x] **Archive dead cards** — 42,886 cards (9.5%) parked in the Archive subdeck
 - [x] **Weakness-weighted card ordering** — `study_priority()` in `study_optimizer.py`
-- [x] **Day-category grouping, value order, Final Jeopardy interspersion** — fixed 2026-07-29: groups were keyed on `(Show number, category)`, but Show number is blank on 18% of the deck (the jwolle1 post-2019 import has no show-number column), collapsing every reused broad category name into one group spanning years of games. Regrouped on `(air_date, round, category)` — verified 0 of 90,465 groups now exceed 5 cards or span more than one category/date. Also added descending-value sort within each group and even interspersion of Final Jeopardy cards (`interleave_blocks()`). See *Study Queue Ordering* above. New one-time script `configure_deck_options.py` sets deck options so new cards show before reviews.
+- [x] **Day-category grouping, value order, Final Jeopardy interspersion** — fixed 2026-07-29: groups were keyed on `(Show number, category)`, but Show number is blank on 18% of the deck (the jwolle1 post-2019 import has no show-number column), collapsing every reused broad category name into one group spanning years of games. Regrouped on `(air_date, round, category)` — verified 0 of 90,465 groups now exceed 5 cards or span more than one category/date. Also added descending-value sort within each group and even interspersion of Final Jeopardy cards (`interleave_blocks()`). See _Study Queue Ordering_ above. New one-time script `configure_deck_options.py` sets deck options so new cards show before reviews.
 
 ### Score Improvements
 

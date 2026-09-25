@@ -49,6 +49,8 @@ from jeopardy_consts import (
     FIELD_DAILY_DOUBLE,
     FIELD_ROUND,
     FIELD_VALUE,
+    FREQ_DETAILS_FIELD_CONFIG_HEX,
+    FREQ_DETAILS_FIELD_NAME,
     FREQ_FIELD_CONFIG_HEX,
     FREQ_FIELD_NAME,
     JEOPARDY_NOTETYPE_ID,
@@ -67,6 +69,7 @@ from jeopardy_consts import (
     STAKE_J_VALUE_MIN,
     SUBJECT_OTHER,
     SUBJECT_BADGE_CLASS,
+    THEME_WINDOW_YEARS,
     TIER_BADGE_CLASS,
     TIER_HIGH_MIN,
     TIER_LOW_MIN,
@@ -84,6 +87,8 @@ from jeopardy_db_helpers import (
     extract_colpkg,
     pack_apkg,
     protobuf_prepend_to_field1,
+    protobuf_get_field,
+    protobuf_replace_fields,
     rename_deck,
     require_anki_closed,
     strip_foreign_decks,
@@ -520,8 +525,8 @@ def ensure_badge_styles(conn: sqlite3.Connection) -> bool:
     return injected
 
 
-def add_frequency_field_and_template(conn: sqlite3.Connection) -> bool:
-    """Add the Frequency Score field + template reference if not already present.
+def add_frequency_fields_and_template(conn: sqlite3.Connection) -> tuple[int, int]:
+    """Add score/detail fields and render the detail only on the card back.
 
     Idempotent: if the field already exists, does nothing and reports that the
     notes already carry the extra field segment.
@@ -530,8 +535,7 @@ def add_frequency_field_and_template(conn: sqlite3.Connection) -> bool:
         conn: SQLite connection
 
     Returns:
-        True if the field was newly added (notes need the segment APPENDED);
-        False if it already existed (notes' last segment should be REPLACED).
+        The note-field ordinals for the score and details fields.
     """
     cursor = conn.cursor()
     cursor.execute(
@@ -539,27 +543,40 @@ def add_frequency_field_and_template(conn: sqlite3.Connection) -> bool:
         (JEOPARDY_NOTETYPE_ID,),
     )
     rows = cursor.fetchall()
-    existing_names = [name for _ord, name in rows]
-    if FREQ_FIELD_NAME in existing_names:
-        logger.info(f"Field '{FREQ_FIELD_NAME}' already present — replace mode")
-        return False
-
-    new_ord = len(rows)
-    config = bytes.fromhex(FREQ_FIELD_CONFIG_HEX)
-    cursor.execute(
-        "INSERT INTO fields (ntid, ord, name, config) VALUES (?, ?, ?, ?)",
-        (JEOPARDY_NOTETYPE_ID, new_ord, FREQ_FIELD_NAME, config),
-    )
+    field_ords = {name: ord_ for ord_, name in rows}
+    for name, config_hex in (
+        (FREQ_FIELD_NAME, FREQ_FIELD_CONFIG_HEX),
+        (FREQ_DETAILS_FIELD_NAME, FREQ_DETAILS_FIELD_CONFIG_HEX),
+    ):
+        if name in field_ords:
+            continue
+        new_ord = len(rows)
+        cursor.execute(
+            "INSERT INTO fields (ntid, ord, name, config) VALUES (?, ?, ?, ?)",
+            (JEOPARDY_NOTETYPE_ID, new_ord, name, bytes.fromhex(config_hex)),
+        )
+        field_ords[name] = new_ord
+        rows.append((new_ord, name))
+        logger.info(f"Added '{name}' field (ord {new_ord})")
 
     # Inject the field reference into the front template (protobuf field 1).
     cursor.execute(
         "SELECT ord, config FROM templates WHERE ntid = ?", (JEOPARDY_NOTETYPE_ID,)
     )
     for tmpl_ord, tconfig in cursor.fetchall():
-        if b"Frequency Score" in tconfig:
+        new_config = tconfig
+        if b"Frequency Score" not in tconfig:
+            prefix = "{{#Frequency Score}}{{Frequency Score}}{{/Frequency Score}}\n"
+            new_config = protobuf_prepend_to_field1(new_config, prefix)
+        if b"Frequency Details" not in new_config:
+            suffix = "\n{{#Frequency Details}}{{Frequency Details}}{{/Frequency Details}}"
+            afmt = protobuf_get_field(new_config, 2)
+            if afmt is not None:
+                new_config = protobuf_replace_fields(
+                    new_config, {2: (afmt.decode("utf-8") + suffix).encode("utf-8")}
+                )
+        if new_config == tconfig:
             continue
-        prefix = "{{#Frequency Score}}{{Frequency Score}}{{/Frequency Score}}\n"
-        new_config = protobuf_prepend_to_field1(tconfig, prefix)
         cursor.execute(
             "UPDATE templates SET config = ?, mtime_secs = ?, usn = -1 "
             "WHERE ntid = ? AND ord = ?",
@@ -575,15 +592,49 @@ def add_frequency_field_and_template(conn: sqlite3.Connection) -> bool:
         (now_secs, JEOPARDY_NOTETYPE_ID),
     )
     cursor.execute("UPDATE col SET scm = ?, mod = ?", (now_ms, now_ms))
-    logger.info(f"Added '{FREQ_FIELD_NAME}' field (ord {new_ord}) + template badge")
-    return True
+    logger.info("Frequency score/detail fields and template references are ready")
+    return field_ords[FREQ_FIELD_NAME], field_ords[FREQ_DETAILS_FIELD_NAME]
+
+
+def build_frequency_details(
+    subject: str,
+    score: int,
+    recent_subject_counts: dict[str, int],
+    start_year: int,
+    latest_year: int,
+) -> str:
+    """Render the recent subject count shown on the back of each card."""
+    appeared = recent_subject_counts.get(subject, 0)
+    return (
+        '<div class="fq-details">'
+        f"<b>Frequently asked theme:</b> {subject}<br>"
+        f"<b>Appeared:</b> {appeared:,} times from {start_year}-{latest_year}<br>"
+        f"<b>Study priority:</b> {score}/100"
+        "</div>"
+    )
+
+
+def build_recent_subject_counts(
+    meta: dict[int, NoteMeta], latest_year: int
+) -> tuple[dict[str, int], int]:
+    """Count subject cards once for the recent display window."""
+    start_year = latest_year - THEME_WINDOW_YEARS + 1
+    counts: dict[str, int] = defaultdict(int)
+    for _answer, _subcat, subject, _label, _secondary, year, _stake in meta.values():
+        if start_year <= year <= latest_year:
+            counts[subject] += 1
+    return dict(counts), start_year
 
 
 def apply_scores_and_tags(
     conn: sqlite3.Connection,
     meta: dict[int, NoteMeta],
     scored: dict[int, tuple[int, Tier]],
-    appended: bool,
+    score_ord: int,
+    details_ord: int,
+    latest_year: int,
+    recent_subject_counts: dict[str, int],
+    start_year: int,
 ) -> int:
     """Write the badge field + freq/subject/subcat/era tags onto every note.
 
@@ -591,8 +642,8 @@ def apply_scores_and_tags(
         conn: SQLite connection
         meta: note_id -> NoteMeta
         scored: note_id -> (score, tier)
-        appended: True if the field was newly added (append the segment);
-            False if replacing the existing last segment
+        score_ord: Note-field ordinal for the score badge
+        details_ord: Note-field ordinal for the back-of-card details
 
     Returns:
         Number of notes updated
@@ -608,12 +659,15 @@ def apply_scores_and_tags(
         score, tier = scored[note_id]
         _ak, _ck, subject, subcat_label, secondary_subject, year, _stake = meta[note_id]
         badge = badge_html(score, tier, subject)
+        details = build_frequency_details(
+            subject, score, recent_subject_counts, start_year, latest_year
+        )
 
         parts = flds.split("\x1f")
-        if appended:
-            parts.append(badge)
-        else:
-            parts[-1] = badge
+        while len(parts) <= details_ord:
+            parts.append("")
+        parts[score_ord] = badge
+        parts[details_ord] = details
         new_flds = "\x1f".join(parts)
 
         # Rebuild tags: drop any prior smart-prep tags, then add fresh ones.
@@ -795,8 +849,19 @@ def main() -> None:
             live_conn.close()
             sys.exit(1)
         ensure_badge_styles(live_conn)
-        appended = add_frequency_field_and_template(live_conn)
-        apply_scores_and_tags(live_conn, meta, scored, appended)
+        score_ord, details_ord = add_frequency_fields_and_template(live_conn)
+        latest_year = max((item[5] for item in meta.values()), default=0)
+        recent_subject_counts, start_year = build_recent_subject_counts(meta, latest_year)
+        apply_scores_and_tags(
+            live_conn,
+            meta,
+            scored,
+            score_ord,
+            details_ord,
+            latest_year,
+            recent_subject_counts,
+            start_year,
+        )
         live_conn.commit()
         live_conn.close()
         logger.info("✓ Scores + tags written to live collection (no import needed)")
@@ -832,8 +897,19 @@ def main() -> None:
                 sys.exit(1)
 
             ensure_badge_styles(conn)
-            appended = add_frequency_field_and_template(conn)
-            apply_scores_and_tags(conn, meta, scored, appended)
+            score_ord, details_ord = add_frequency_fields_and_template(conn)
+            latest_year = max((item[5] for item in meta.values()), default=0)
+            recent_subject_counts, start_year = build_recent_subject_counts(meta, latest_year)
+            apply_scores_and_tags(
+                conn,
+                meta,
+                scored,
+                score_ord,
+                details_ord,
+                latest_year,
+                recent_subject_counts,
+                start_year,
+            )
 
             # Find the Jeopardy deck, rename it, then strip all other decks so
             # the output .apkg contains only the new Jeopardy Smart Prep deck.

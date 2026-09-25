@@ -47,9 +47,14 @@ WEIGHT_SUBJECT: Final[float] = 0.25
 
 # New note-type field that displays the score on the card.
 FREQ_FIELD_NAME: Final[str] = "Frequency Score"
+FREQ_DETAILS_FIELD_NAME: Final[str] = "Frequency Details"
 # Reused verbatim from the existing Jeopardy fields (Arial / size 20 /
 # {"media":[]}) — a valid Anki FieldConfig protobuf.
 FREQ_FIELD_CONFIG_HEX: Final[str] = "1a05417269616c2014fa0f0c7b226d65646961223a5b5d7d"
+FREQ_DETAILS_FIELD_CONFIG_HEX: Final[str] = FREQ_FIELD_CONFIG_HEX
+
+# The detail line describes the latest five complete years in the collection.
+THEME_WINDOW_YEARS: Final[int] = 5
 
 # Badge colors by tier (most-frequent = warm/urgent, rare = muted).
 TIER_BADGE_COLORS: Final[dict[str, str]] = {
